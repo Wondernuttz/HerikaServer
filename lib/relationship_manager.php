@@ -497,6 +497,7 @@ class RelationshipManager {
         if (preg_match_all('/#REL:([^=]+)=([+-]?\d+)#/', $aiResponse, $matches)) {
             foreach ($matches[1] as $i => $target) {
                 $target = trim($target);
+                if (in_array(strtolower($target), ['the narrator', 'narrator'], true)) continue; // never track the narrator as a relationship
                 $delta = (int)$matches[2][$i];
 
                 // Initialize if doesn't exist
@@ -519,6 +520,7 @@ class RelationshipManager {
         if (preg_match_all('/#TYPE:([^=]+)=([a-zA-Z]+)#/', $aiResponse, $matches)) {
             foreach ($matches[1] as $i => $target) {
                 $target = trim($target);
+                if (in_array(strtolower($target), ['the narrator', 'narrator'], true)) continue; // never track the narrator as a relationship
                 $newType = strtolower(trim($matches[2][$i]));
 
                 // Accept any single-word type (allows custom types like "client", "mentor", etc.)

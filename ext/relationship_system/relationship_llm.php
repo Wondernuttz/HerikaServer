@@ -436,6 +436,9 @@ PROMPT;
 
             // Normalize player references
             $targetLower = strtolower(trim($target));
+            if (in_array($targetLower, ['narrator', 'the narrator'], true)) {
+                continue; // never track the narrator as a relationship target
+            }
             if (in_array($targetLower, ['player', 'the player', 'dragonborn', 'the dragonborn', '#player_name#'])) {
                 $target = 'Player';
             }
@@ -1200,7 +1203,8 @@ PROMPT;
             'hero', 'the hero',
             'champion', 'the champion',
             'chosen one', 'the chosen one',
-            'nightingale', 'the nightingale'
+            'nightingale', 'the nightingale',
+            'narrator', 'the narrator'
         ];
 
         foreach ($changes as $target => $change) {
