@@ -136,31 +136,53 @@ class RelationshipLLM {
      * NOTE: Does NOT call setOldGlobals() here - that happens in makeSafeRequest()
      * to avoid corrupting the main chat connector's globals
      */
-    // SHARMAT (2026-07-02): packaged character facts from the NSFW profile. These persist across saves in
-    // nsfw_npc_data and must inform every relationship evaluation - they are the character's durable
-    // identity (a married, monogamous NPC judges intimacy differently), not derivable from one dialogue.
-    private function nsfwCharacterFacts($npcName) {
+    // Extension-provided character facts. Extensions register fact sources in
+    // conf_opts id='chim_character_facts_sources' (JSON array of
+    // {table, name_column, facts:{label: sql_expression}, skip_values:{label:[values]}}).
+    // Data-driven (no code hooks) so the standalone worker daemon sees registrations too.
+    // No registrations -> empty string; unknown tables/columns fail silently per source.
+    private function extensionCharacterFacts($npcName) {
         try {
             if (empty($GLOBALS['db']) || (string)$npcName === '') { return ''; }
-            $e = $GLOBALS['db']->escape($npcName);
-            $row = $GLOBALS['db']->fetchOne(
-                "SELECT extended_data->>'sexual_orientation' AS o, extended_data->>'spousal_status' AS s,
-                        extended_data->>'spouse_names' AS n, extended_data->>'relationship_preference' AS p
-                 FROM nsfw_npc_data WHERE npc_name = '{$e}'");
-            if (!$row) { return ''; }
-            $bits = [];
-            if (!empty($row['o'])) { $bits[] = "sexual orientation: {$row['o']}"; }
-            if (!empty($row['s']) && strtolower($row['s']) !== 'single') {
-                $bits[] = "spousal status: {$row['s']}" . (!empty($row['n']) ? " (spouse: {$row['n']})" : '');
-            } elseif (!empty($row['n'])) {
-                $bits[] = "spouse: {$row['n']}";
+            static $sources = null;
+            if ($sources === null) {
+                $sources = [];
+                $row = $GLOBALS['db']->fetchOne("SELECT value FROM conf_opts WHERE id = 'chim_character_facts_sources'");
+                if ($row && !empty($row['value'])) {
+                    $decoded = json_decode($row['value'], true);
+                    if (is_array($decoded)) { $sources = $decoded; }
+                }
             }
-            if (!empty($row['p'])) { $bits[] = "relationship preference: {$row['p']}"; }
+            if (empty($sources)) { return ''; }
+            $bits = [];
+            $e = $GLOBALS['db']->escape($npcName);
+            foreach ($sources as $src) {
+                $table = preg_replace('/[^a-zA-Z0-9_]/', '', (string)($src['table'] ?? ''));
+                $nameCol = preg_replace('/[^a-zA-Z0-9_]/', '', (string)($src['name_column'] ?? ''));
+                $facts = is_array($src['facts'] ?? null) ? $src['facts'] : [];
+                if ($table === '' || $nameCol === '' || empty($facts)) { continue; }
+                $selects = [];
+                $i = 0;
+                $aliasByLabel = [];
+                foreach ($facts as $label => $expr) {
+                    $alias = 'f' . $i++;
+                    $aliasByLabel[$label] = $alias;
+                    $selects[] = "({$expr}) AS {$alias}";
+                }
+                $frow = $GLOBALS['db']->fetchOne("SELECT " . implode(', ', $selects) . " FROM {$table} WHERE {$nameCol} = '{$e}'");
+                if (!$frow) { continue; }
+                $skip = is_array($src['skip_values'] ?? null) ? $src['skip_values'] : [];
+                foreach ($aliasByLabel as $label => $alias) {
+                    $val = trim((string)($frow[$alias] ?? ''));
+                    if ($val === '') { continue; }
+                    if (isset($skip[$label]) && in_array(strtolower($val), array_map('strtolower', (array)$skip[$label]), true)) { continue; }
+                    $bits[] = "{$label}: {$val}";
+                }
+            }
             if (!$bits) { return ''; }
             return "Character facts for {$npcName} (persistent profile - respect these when judging relationship changes): " . implode('; ', $bits) . "\n";
         } catch (\Throwable $t) { return ''; }
     }
-
     private function initConnector() {
         require_once $GLOBALS['ENGINE_PATH'] . "lib/core/llm_connector.class.php";
 
@@ -320,7 +342,7 @@ class RelationshipLLM {
         if (!empty($npc['race'])) {
             $npcContext .= "Race: " . $npc['race'] . "\n";
         }
-        $npcContext .= $this->nsfwCharacterFacts($npcName); // packaged profile facts seed the init (fix 2026-07-02c)
+        $npcContext .= $this->extensionCharacterFacts($npcName); // extension character facts (see extensionCharacterFacts)
 
         // Build prompt
         $systemPrompt = $this->getAnalysisPrompt($playerName);
@@ -761,7 +783,7 @@ PROMPT;
 
         // Build context string
         $contextStr = "";
-        $contextStr .= $this->nsfwCharacterFacts($npcName); // packaged profile facts steer live updates (fix 2026-07-02c)
+        $contextStr .= $this->extensionCharacterFacts($npcName); // extension character facts
 
         // Director instruction context (rolemaster guidance)
         // This explains why an NPC might behave in ways that seem out of character
@@ -987,8 +1009,8 @@ PROMPT;
 
         // Build context string
         $contextStr = "";
-        $contextStr .= $this->nsfwCharacterFacts($speakerName);  // packaged profile facts for both parties (fix 2026-07-02c)
-        $contextStr .= $this->nsfwCharacterFacts($listenerName);
+        $contextStr .= $this->extensionCharacterFacts($speakerName);  // extension character facts, both parties
+        $contextStr .= $this->extensionCharacterFacts($listenerName);
 
         // Director instruction context (rolemaster guidance)
         if (!empty($context['director_instruction'])) {
