@@ -64,7 +64,7 @@ if ($argv[1] == "2") {
             'sent' => 0,
             'actor' => "rolemaster",
             'text' => "",
-            'action' => "rolecommand|BackgroundCmd@0x0001A67C@Track",
+            'action' => "rolecommand|BackgroundCmd@0x0001E7D6@Track",
             'tag' => __FILE__ . ":" . __LINE__,
         ]
     );
@@ -280,19 +280,20 @@ Earn some gold by mining and selling ores to merchants.
     $npcMaster->updateByArray($npc);
     error_log("[DEBUG] Updated NPC profile for {$miner_profile["name"]} in database waiting 10 secs" . PHP_EOL);
     
-    $refid=$npc["refid"];
+    $refid=isset($npc["refid"]) ? $npc["refid"] : null;
 
     if (empty($refid)) {
         error_log("[DEBUG] Waiting to refid to be populated for {$miner_profile["name"]}...".PHP_EOL);
 
-        $maxRetries = 10;
+        $maxRetries = 30;
         $retryCount = 0;
         while (empty($refid) && $retryCount < $maxRetries) {
             sleep(1);
             $retryCount++;
             $npcMaster = new NpcMaster();
             $npc = $npcMaster->getByName($miner_profile["name"]);
-            $refid=$npc["refid"];
+            $refid=isset($npc["refid"]) ? $npc["refid"] : null;
+            error_log("[DEBUG] Waiting to refid to be populated for {$miner_profile["name"]}... $retryCount of $maxRetries".PHP_EOL);
         }
 
         if (empty($refid)) {
@@ -348,7 +349,11 @@ Earn some gold by mining and selling ores to merchants.
             'tag' => __FILE__ . ":" . __LINE__,
         ]
     );
-    // Need to register the action to bgevent recognize it as valid
+    // Need to register the action to bgevent recognize it as valid, so it triggers the bgevent when the NPC reaches the mine.
+
+    $res = $GLOBALS["db"]->fetchOne("select max(gamets) as gamets,max(ts) as ts from eventlog order by gamets desc,ts desc limit 1");
+    $last_gamets = $res["gamets"];
+    $last_ts = $res["ts"];
 
     $GLOBALS["db"]->insert('actions_issued', [
         'action' => 'TravelTo',
