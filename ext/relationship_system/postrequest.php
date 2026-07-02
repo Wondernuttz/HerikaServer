@@ -255,7 +255,7 @@ if ($useRelLLM && $npcId) {
     $playerInputTypes = ["inputtext", "inputtext_s", "ginputtext", "ginputtext_s"];
     if (isset($gameRequest[0]) && in_array($gameRequest[0], $playerInputTypes) && !empty($gameRequest[3])) {
         $playerAction = $gameRequest[3];
-        // Remove "PlayerName:" prefix if present (e.g., "Bannon:Hello" -> "Hello")
+        // Remove "PlayerName:" prefix if present (e.g., "PlayerName:Hello" -> "Hello")
         $playerAction = preg_replace('/^[A-Za-z]+:\s*/', '', $playerAction);
         // Also remove "(Talking to everyone)" or similar tags
         $playerAction = preg_replace('/\s*\(Talking to [^)]+\)\s*$/i', '', $playerAction);
