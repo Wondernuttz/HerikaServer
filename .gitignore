@@ -17,3 +17,5 @@ conf/conf_*.php
 !/data/voices/TheNarrator.wav
 */Zone.Identifier
 backups/*.bak*
+*.bak_fable_*
+*.backup-2026*
