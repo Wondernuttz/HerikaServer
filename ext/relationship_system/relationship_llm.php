@@ -136,6 +136,31 @@ class RelationshipLLM {
      * NOTE: Does NOT call setOldGlobals() here - that happens in makeSafeRequest()
      * to avoid corrupting the main chat connector's globals
      */
+    // SHARMAT (2026-07-02): packaged character facts from the NSFW profile. These persist across saves in
+    // nsfw_npc_data and must inform every relationship evaluation - they are the character's durable
+    // identity (a married, monogamous NPC judges intimacy differently), not derivable from one dialogue.
+    private function nsfwCharacterFacts($npcName) {
+        try {
+            if (empty($GLOBALS['db']) || (string)$npcName === '') { return ''; }
+            $e = $GLOBALS['db']->escape($npcName);
+            $row = $GLOBALS['db']->fetchOne(
+                "SELECT extended_data->>'sexual_orientation' AS o, extended_data->>'spousal_status' AS s,
+                        extended_data->>'spouse_names' AS n, extended_data->>'relationship_preference' AS p
+                 FROM nsfw_npc_data WHERE npc_name = '{$e}'");
+            if (!$row) { return ''; }
+            $bits = [];
+            if (!empty($row['o'])) { $bits[] = "sexual orientation: {$row['o']}"; }
+            if (!empty($row['s']) && strtolower($row['s']) !== 'single') {
+                $bits[] = "spousal status: {$row['s']}" . (!empty($row['n']) ? " (spouse: {$row['n']})" : '');
+            } elseif (!empty($row['n'])) {
+                $bits[] = "spouse: {$row['n']}";
+            }
+            if (!empty($row['p'])) { $bits[] = "relationship preference: {$row['p']}"; }
+            if (!$bits) { return ''; }
+            return "Character facts for {$npcName} (persistent profile - respect these when judging relationship changes): " . implode('; ', $bits) . "\n";
+        } catch (\Throwable $t) { return ''; }
+    }
+
     private function initConnector() {
         require_once $GLOBALS['ENGINE_PATH'] . "lib/core/llm_connector.class.php";
 
@@ -295,6 +320,7 @@ class RelationshipLLM {
         if (!empty($npc['race'])) {
             $npcContext .= "Race: " . $npc['race'] . "\n";
         }
+        $npcContext .= $this->nsfwCharacterFacts($npcName); // packaged profile facts seed the init (fix 2026-07-02c)
 
         // Build prompt
         $systemPrompt = $this->getAnalysisPrompt($playerName);
@@ -735,6 +761,7 @@ PROMPT;
 
         // Build context string
         $contextStr = "";
+        $contextStr .= $this->nsfwCharacterFacts($npcName); // packaged profile facts steer live updates (fix 2026-07-02c)
 
         // Director instruction context (rolemaster guidance)
         // This explains why an NPC might behave in ways that seem out of character
@@ -960,6 +987,8 @@ PROMPT;
 
         // Build context string
         $contextStr = "";
+        $contextStr .= $this->nsfwCharacterFacts($speakerName);  // packaged profile facts for both parties (fix 2026-07-02c)
+        $contextStr .= $this->nsfwCharacterFacts($listenerName);
 
         // Director instruction context (rolemaster guidance)
         if (!empty($context['director_instruction'])) {
