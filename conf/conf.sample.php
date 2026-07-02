@@ -55,6 +55,9 @@ $BOOK_EVENT_ALWAYS_NARRATOR=false; //Only The Narrator summarizes books.
 $NARRATOR_TALKS=true; //Enables the Narrator.
 $NARRATOR_WELCOME=false;
 $QUEST_COMMENT = false;
+$CHIM_AI_QUEST_PROGRESSION=false; //Enable CHIM AI quest progression. Allows you to progress regular Skyrim quests with AI dialogue. Most vanilla non radiant quests are supported. Open the AI Quest Manager in Immersion for more info.
+$CHIM_PLAYER_ONLY_QUEST_ADVANCEMENT=true; //When enabled, only direct player dialogue can fire CHIM AI quest beats and queue quest stage actions. Disable to let NPC responses and game interaction events advance or start quest beats.
+$CHIM_ITEM_PICKUP_EVENTLOG_MIN_VALUE=500; //Minimum total item value for player pickups to be detected in context.
 $QUEST_COMMENT_CHANCE= "10%";
 $CURRENT_TASK=false; //Sends current plan/quest to the AI
  //The Narrator will recap previous events after a save is loaded.
@@ -333,7 +336,9 @@ $TTS["CHATTERBOX"]["PARALINGUISTIC_TAGS_ENABLED"]=false; //Enable paralinguistic
 $TTS["CHATTERBOX"]["PARALINGUISTIC_TAGS_PROMPT"]=''; //Prompt snippet for instructing LLM to use paralinguistic tags.
 $TTS["CHATTERBOX"]["PARALINGUISTIC_TAGS_LIST"]='[clear throat],[sigh],[shush],[cough],[groan],[sniff],[gasp],[chuckle],[laugh]'; //Comma-separated list of supported tags.
 //PocketTTS
-$TTS["POCKETTTS"]["endpoint"]='http://127.0.0.1:8020'; //API endpoint.
+$TTS["POCKETTTS"]["endpoint"]='http://127.0.0.1:8086'; //API endpoint.
+$TTS["POCKETTTS"]["api_format"]='audio_cpp'; //API format: audio_cpp or legacy.
+$TTS["POCKETTTS"]["model"]='pocket-tts'; //audio.cpp model id.
 $TTS["POCKETTTS"]["language"]='en'; //Language.
 $TTS["POCKETTTS"]["voiceid"]='TheNarrator'; //Generated voice file name.
 $TTS["POCKETTTS"]["voicelogic"]='voicetype';

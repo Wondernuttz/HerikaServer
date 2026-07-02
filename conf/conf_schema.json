@@ -53,6 +53,8 @@
   "NARRATOR_WELCOME": {"userlvl":"basic","type":"boolean","description":"The Narrator will give you a quick recap of what happened previously after you have loaded a save game. Has a 10 minute IRL cooldown so its not annoying.","scope":"global"},
   "HIDE_NARRATOR_DIALOGUE": {"userlvl":"basic","type":"boolean","description":"Hide Narrator-spoken dialogue lines from NPC context.","scope":"global"},
   "QUEST_COMMENT":{"type":"boolean","userlvl":"basic","description":"Will trigger AI (NPCs and Narrator) to talk about new objectives in your current active quest. Will trigger a lot of events on a new character, so leave disabled until you complete the tutorial!"},
+  "CHIM_AI_QUEST_PROGRESSION": {"type":"boolean","userlvl":"basic","scope":"global","default":false,"description":"Enable CHIM AI quest progression. Allows you to progress regular Skyrim quests with AI dialogue. Most vanilla non radiant quests are supported. Open the AI Quest Manager in Immersion for more info."},
+  "CHIM_PLAYER_ONLY_QUEST_ADVANCEMENT": {"type":"boolean","userlvl":"basic","scope":"global","default":true,"description":"When enabled, only direct player dialogue can fire CHIM AI quest beats and queue quest stage actions. Disable to let NPC responses and game interaction events advance or start quest beats."},
   "QUEST_COMMENT_CHANCE":{"type":"select","userlvl":"basic","values":["10%","25%","50%","75%","100%"],"description":"Chance that an AI Quest Comment will happen every time a quest updates."},
   "QUEST_COMMENT_COOLDOWN": {"type":"integer","userlvl":"basic","description":"Minimum time in minutes between quest comments. Default: 3 minutes","scope":"global"},
   "CURRENT_TASK": {"userlvl":"basic","type":"boolean","description":"Include the current Dynamic AI Objective to the AI NPC's prompt. Disable this if the AI NPC becomes fixated on the task."},
@@ -63,6 +65,7 @@
   "ITEM_BLACKLIST": {"userlvl":"basic","type":"longstring","scope":"global","description":"Comma-separated list of item/armor names to exclude from dynamic context (e.g. 'Iron Sword, Leather Armor, Health Potion')."},
   "SHORTER_NEARBY_ITEM_LIST": {"userlvl":"basic","type":"boolean","scope":"global","description":"Group duplicate nearby ground items into one counted entry. When enabled, context shows one line per unique nearby item plus a single representative RefID in the item descriptions block."},
   "EVENT_TYPE_FILTER": {"userlvl":"basic","type":"longstring","scope":"global","description":"Comma-separated list of event types to exclude from context generation (e.g. 'death, itemfound, spellcast')."},
+  "CHIM_ITEM_PICKUP_EVENTLOG_MIN_VALUE": {"userlvl":"basic","type":"integer","scope":"global","default":500,"description":"Minimum total item value for player pickups to be detected in context."},
   "GROUND_ITEMS_DESCRIPTIONS_ONLY": {"userlvl":"basic","type":"boolean","scope":"global","description":"Only show nearby ground items in context that have descriptions in the description manager."},
   "INVENTORY_ITEMS_DESCRIPTIONS_ONLY": {"userlvl":"basic","type":"boolean","scope":"global","description":"Only show inventory items in context that have descriptions in the description manager."},
   "HIDE_AMBIENT_COMBAT": {"userlvl":"basic","type":"boolean","scope":"global","description":"Hide ambient NPC-to-NPC combat deaths from context during requests. Only player and companion kills will be shown. This is useful for hiding the violent nature of Skyrim's nature from being detected."},
@@ -277,7 +280,9 @@
     },
     "POCKETTTS": {
       "_title":"PocketTTS",
-       "endpoint":{"type":"url","description":"PocketTTS endpoint. CPU-only TTS, uses same port as XTTS (8020) by default. Click[HOST PC IP] or [WSL IP] to configure.", "helpurl":"https://dwemerdynamics.com/chim/tts.html#PocketTts"},
+       "endpoint":{"type":"url","description":"PocketTTS endpoint. DwemerDistro audio.cpp PocketTTS uses port 8086 by default. Legacy Python PocketTTS uses port 8020.", "helpurl":"https://dwemerdynamics.com/chim/tts.html#PocketTts"},
+      "api_format":{"type":"select","values":["audio_cpp","legacy"],"description":"PocketTTS API format. Use audio_cpp for the DwemerDistro C++ runtime or legacy for the older Python bridge."},
+      "model":{"type":"string","description":"audio.cpp model id. Default: pocket-tts."},
       "language":{"type":"select","values":[  "ar","pt","zh-cn", "cs","nl","en","fr", "de", "it", "pl", "ru", "es", "tr","ja", "ko","hu","hi"],"description":"Language to use."},
       "voiceid":{"type":"string","description":"Generated voice file name. Click the help link to go to voice management.","helpurl":"/HerikaServer/ui/xtts_clone.php"},
       "voicelogic":{"type":"select","values":["voicetype","name"], "description":"Default profile only. Logic used for generating [TTS POCKETTTS voiceid] <br> voicetype = NPC voicetype ID (femalenord) <br> name = NPC name (mjoll_the_lioness)", "scope":"global"}

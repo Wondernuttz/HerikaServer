@@ -67,6 +67,7 @@ $updateVersion = function($tablename,$version) {
 
 // Ensure base schema and extensions exist for fresh installs
 $db->execQuery('CREATE SCHEMA IF NOT EXISTS public');
+$db->execQuery('CREATE SCHEMA IF NOT EXISTS plugins');
 $db->execQuery("SET search_path TO public");
 $db->execQuery('CREATE EXTENSION IF NOT EXISTS vector');
 $db->execQuery('CREATE EXTENSION IF NOT EXISTS pg_trgm');
@@ -4292,7 +4293,44 @@ if ($checkTableExists("sneq_quests_saved") == -1) {
 } else
     Logger::info(__FILE__." sneq_quests_saved exists");
 
+$questEngineSchemaSql = file_get_contents(__DIR__."/../data/chim_quest_engine.sql");
+if ($checkTableExists("skyrim_quest_definitions") == -1 || $checkTableExists("chim_quest_definitions") != -1) {
+    $db->execQuery($questEngineSchemaSql);
+} else {
+    Logger::info(__FILE__." skyrim_quest_definitions exists");
+    $db->execQuery($questEngineSchemaSql);
+}
 
+if ($checkTableExists("skyrim_quest_definitions") != -1) {
+    require_once(__DIR__ . "/../lib/chim_quest_engine.php");
+    try {
+        $questDefinitionCount = $db->fetchOne("SELECT COUNT(*) AS n FROM public.skyrim_quest_definitions");
+        $questDefinitionSeedVersion = 20260628003;
+        if (intval($questDefinitionCount["n"] ?? 0) === 0 || $checkVersion("skyrim_quest_definitions") < $questDefinitionSeedVersion) {
+            $db->execQuery("
+                DELETE FROM public.skyrim_quest_definitions
+                WHERE source_path LIKE '%/data/chim_quest_engine/definitions/%'
+                   OR source_path LIKE '%\\data\\chim_quest_engine\\definitions\\%'
+            ");
+            $questImportResults = chimQuestEngineImportBundledDefinitions();
+            $questImportSuccessCount = 0;
+            foreach ($questImportResults as $questImportResult) {
+                if (is_array($questImportResult) && !empty($questImportResult["success"])) {
+                    $questImportSuccessCount++;
+                }
+            }
+            Logger::info(__FILE__ . " imported bundled skyrim quest definitions: {$questImportSuccessCount}/" . count($questImportResults));
+            if ($questImportSuccessCount === count($questImportResults) && $questImportSuccessCount > 0) {
+                $updateVersion("skyrim_quest_definitions", $questDefinitionSeedVersion);
+            } else {
+                Logger::warn(__FILE__ . " bundled skyrim quest definitions import incomplete; version not advanced");
+            }
+        }
+    } catch (Exception $e) {
+        Logger::warn(__FILE__ . " could not import bundled skyrim quest definitions: " . $e->getMessage());
+    }
+
+}
 
 // Some imported dump-style SQL files clear search_path; restore it before
 // running unqualified late-stage migrations.
@@ -6487,6 +6525,82 @@ if ($checkVersion("general_settings") < 20260511001) {
 
 //----------------------------------------------------
 
+if ($checkVersion("general_settings") < 20260619001) {
+    Logger::debug("Applying general_settings 20260619001 - add CHIM AI quest progression settings");
+    $b_ok = true;
+
+    try {
+        $questSettingDefaults = [
+            'CHIM_AI_QUEST_PROGRESSION' => false,
+            'CHIM_PLAYER_ONLY_QUEST_ADVANCEMENT' => true,
+        ];
+
+        foreach ($questSettingDefaults as $settingId => $fallbackDefault) {
+            $existingRow = chimGetGeneralSettingRow($settingId);
+            $definition = chimGetSchemaDefinition($settingId);
+            $description = chimGetManagedGeneralSettingDescriptions()[$settingId] ?? chimGetSchemaDescription($settingId);
+
+            if ($existingRow) {
+                $currentValue = $existingRow['value'] ?? ($definition['default'] ?? $fallbackDefault);
+            } else {
+                $hasLegacyValue = chimReadLegacyGlobalValue($settingId, "__CHIM_SETTING_MISSING__");
+                $currentValue = ($hasLegacyValue === "__CHIM_SETTING_MISSING__")
+                    ? ($definition['default'] ?? $fallbackDefault)
+                    : $hasLegacyValue;
+            }
+
+            if (!chimSetGeneralSetting($settingId, $currentValue, $description)) {
+                throw new Exception("Failed writing general setting '{$settingId}'");
+            }
+        }
+    } catch (Exception $e) {
+        $b_ok = false;
+        Logger::error("Error adding CHIM AI quest progression settings: " . $e->getMessage());
+    }
+
+    if ($b_ok) {
+        $updateVersion("general_settings", 20260619001);
+        Logger::info("Applied patch general_settings 20260619001");
+    }
+}
+
+//----------------------------------------------------
+
+if ($checkVersion("general_settings") < 20260627001) {
+    Logger::debug("Applying general_settings 20260627001 - add player item pickup eventlog threshold");
+    $b_ok = true;
+
+    try {
+        $settingId = 'CHIM_ITEM_PICKUP_EVENTLOG_MIN_VALUE';
+        $existingRow = chimGetGeneralSettingRow($settingId);
+        $definition = chimGetSchemaDefinition($settingId);
+        $description = chimGetManagedGeneralSettingDescriptions()[$settingId] ?? chimGetSchemaDescription($settingId);
+
+        if ($existingRow) {
+            $currentValue = $existingRow['value'] ?? ($definition['default'] ?? 500);
+        } else {
+            $hasLegacyValue = chimReadLegacyGlobalValue($settingId, "__CHIM_SETTING_MISSING__");
+            $currentValue = ($hasLegacyValue === "__CHIM_SETTING_MISSING__")
+                ? ($definition['default'] ?? 500)
+                : $hasLegacyValue;
+        }
+
+        if (!chimSetGeneralSetting($settingId, $currentValue, $description)) {
+            throw new Exception("Failed writing general setting '{$settingId}'");
+        }
+    } catch (Exception $e) {
+        $b_ok = false;
+        Logger::error("Error adding player item pickup eventlog threshold setting: " . $e->getMessage());
+    }
+
+    if ($b_ok) {
+        $updateVersion("general_settings", 20260627001);
+        Logger::info("Applied patch general_settings 20260627001");
+    }
+}
+
+//----------------------------------------------------
+
 if ($checkVersion("core_action") < 20260502011) {
     Logger::debug("Applying core_action 20260502011 - sync sitting restrictions for Drink, Toast, and StartRitualCeremony");
     $b_ok = true;
@@ -6859,6 +6973,129 @@ if ($relationshipMetadataNeedsRefresh) {
     } catch (Exception $e) {
         Logger::error("Error applying bio_templates relationship refresh: " . $e->getMessage());
     }
+}
+
+if ($checkVersion("memory") < 20260617001) {
+    Logger::debug("Applying memory 20260617001 - widen localts to bigint (avoids int4 overflow on long-running games / Y2038)");
+
+    $db->execQuery("ALTER TABLE public.memory ALTER COLUMN localts TYPE bigint");
+
+    $updateVersion("memory", 20260617001);
+    Logger::info("Applied patch memory 20260617001");
+}
+
+if ($checkVersion("bgl_history") < 20260623001) {
+    Logger::debug("Applying bgl_history 20260623001 - create BgL history table");
+
+    $db->execQuery("
+        CREATE TABLE IF NOT EXISTS public.bgl_history (
+            rowid bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            npc varchar,
+            gamets bigint,
+            ts bigint,
+            localts bigint,
+            data varchar
+        )
+    ");
+
+    $updateVersion("bgl_history", 20260623001);
+    Logger::info("Applied patch bgl_history 20260623001");
+
+}
+
+if ($checkVersion("oghma") < 20260625001) {
+    Logger::debug("Applying oghma 20260625001 - ensure topic has a unique constraint for upserts");
+
+    $db->execQuery("DELETE FROM public.oghma WHERE topic IS NULL");
+
+    $db->execQuery("
+        DELETE FROM public.oghma o
+        USING (
+            SELECT ctid
+            FROM (
+                SELECT
+                    ctid,
+                    row_number() OVER (
+                        PARTITION BY topic
+                        ORDER BY
+                            CASE WHEN topic_desc IS NOT NULL AND btrim(topic_desc) <> '' THEN 1 ELSE 0 END DESC,
+                            CASE WHEN topic_desc_basic IS NOT NULL AND btrim(topic_desc_basic) <> '' THEN 1 ELSE 0 END DESC,
+                            CASE WHEN knowledge_class IS NOT NULL AND btrim(knowledge_class) <> '' THEN 1 ELSE 0 END DESC,
+                            CASE WHEN knowledge_class_basic IS NOT NULL AND btrim(knowledge_class_basic) <> '' THEN 1 ELSE 0 END DESC,
+                            CASE WHEN tags IS NOT NULL AND btrim(tags) <> '' THEN 1 ELSE 0 END DESC,
+                            CASE WHEN category IS NOT NULL AND btrim(category) <> '' THEN 1 ELSE 0 END DESC,
+                            ctid
+                    ) AS rn
+                FROM public.oghma
+            ) ranked
+            WHERE rn > 1
+        ) dupes
+        WHERE o.ctid = dupes.ctid
+    ");
+
+    $db->execQuery("
+        DO $$
+        DECLARE
+            topic_attnum smallint;
+        BEGIN
+            SELECT a.attnum
+              INTO topic_attnum
+              FROM pg_attribute a
+             WHERE a.attrelid = 'public.oghma'::regclass
+               AND a.attname = 'topic'
+               AND a.attnum > 0
+               AND NOT a.attisdropped;
+
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_index i
+                JOIN pg_class t ON t.oid = i.indrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                WHERE n.nspname = 'public'
+                  AND t.relname = 'oghma'
+                  AND i.indisunique
+                  AND i.indpred IS NULL
+                  AND i.indnkeyatts = 1
+                  AND i.indkey::text = topic_attnum::text
+            ) THEN
+                CREATE UNIQUE INDEX oghma_topic_unique_idx ON public.oghma (topic);
+            END IF;
+        END
+        $$;
+    ");
+
+    $updateVersion("oghma", 20260625001);
+    Logger::info("Applied patch oghma 20260625001");
+}
+
+if ($checkVersion("core_tts_connector_pockettts_audiocpp") < 20260628001) {
+    Logger::debug("Applying core_tts_connector_pockettts_audiocpp 20260628001 - expose audio.cpp PocketTTS metadata");
+
+    if ($checkTableExists("core_tts_connector") != -1) {
+        $db->execQuery("
+            UPDATE public.core_tts_connector
+               SET metadata = jsonb_set(
+                    jsonb_set(
+                        jsonb_set(
+                            COALESCE(metadata, '{}'::jsonb),
+                            '{endpoint,description}',
+                            to_jsonb('Endpoint URL. DwemerDistro audio.cpp PocketTTS uses port 8086 by default. Legacy Python PocketTTS uses port 8020.'::text),
+                            true
+                        ),
+                        '{api_format}',
+                        '{\"type\":\"select\",\"values\":[\"audio_cpp\",\"legacy\"],\"description\":\"PocketTTS API format. Use audio_cpp for the DwemerDistro C++ runtime or legacy for the older Python bridge.\"}'::jsonb,
+                        true
+                    ),
+                    '{model}',
+                    '{\"type\":\"string\",\"description\":\"audio.cpp model id. Default: pocket-tts.\"}'::jsonb,
+                    true
+                )
+             WHERE driver = 'pockettts'
+        ");
+    }
+
+    $updateVersion("core_tts_connector_pockettts_audiocpp", 20260628001);
+    Logger::info("Applied patch core_tts_connector_pockettts_audiocpp 20260628001");
 }
 
 Logger::info(__FILE__." update file processed");

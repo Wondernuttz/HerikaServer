@@ -186,10 +186,17 @@ $lastInteractionRow = $db->fetchOne(
 );
 
 if (empty($lastInteractionRow['gamets'])) {
-    error_log('[BACKGROUND LIFE] No prior interaction found — updating timestamp and skipping.');
-    $extdata['background_life_last_updated'] = $last_gamets;
-    $npcMaster->updateByArray($npcMaster->setExtendedData($currentNpcData, $extdata));
-    return;
+    if ($extdata["background_life_player_unattached"]) {
+        error_log('[BACKGROUND LIFE] No prior interaction found but background_life_player_unattached is true');
+    } else {
+        error_log('[BACKGROUND LIFE] No prior interaction found, but background_life_player_unattached is false — skipping.');
+        $extdata['background_life_last_updated'] = $last_gamets;
+        $npcMaster->updateByArray($npcMaster->setExtendedData($currentNpcData, $extdata));
+
+        return;
+
+    }
+
 }
 
 $lastItGamets = (int) $lastInteractionRow['gamets'];
@@ -218,7 +225,7 @@ $daysPassed = round(($last_gamets - $lastItGamets) * GAMETS_TO_HOURS / 24, 2);
 
 // ─── Dynamic Biography ────────────────────────────────────────────────────────
 
-$dynamicBiography = buildDynamicBiography($GLOBALS, true, true);
+$dynamicBiography = buildDynamicBiography($GLOBALS, true, true,true);
 
 if (isset($extdata['middle_term_memory'])) {
     $middleTermMemory = end($extdata['middle_term_memory']);
@@ -237,14 +244,19 @@ $contextDataHistoric = filterHistoricContextForNarratorVisibility(
     $GLOBALS['HERIKA_NAME'] ?? ''
 );
 
-$history = "\n<last_dialogue>\n";
-foreach ($contextDataHistoric as $entry) {
-    $line = trim($entry['content']);
-    $history .= ($entry['role'] === 'assistant')
-        ? "{$GLOBALS['HERIKA_NAME']}: $line\n\n"
-        : "$line\n\n";
+if ($extdata['background_life_player_unattached']) {
+    // NPC unattached, so maybe does not nothing about player
+} else {
+    $history = "\n<last_dialogue>
+This represents last dialogue where player ({$GLOBALS['PLAYER_NAME']}) was present. Can be more dialogues with other NPCs from this point.\n";
+    foreach ($contextDataHistoric as $entry) {
+        $line = trim($entry['content']);
+        $history .= ($entry['role'] === 'assistant')
+            ? "{$GLOBALS['HERIKA_NAME']}: $line\n\n"
+            : "$line\n\n";
+    }
+    $history .= "\nNote: {$GLOBALS['PLAYER_NAME']} leaves and is absent from this point on.\n</last_dialogue>\n";
 }
-$history .= "\nNote: {$GLOBALS['PLAYER_NAME']} leaves and is absent from this point on.\n</last_dialogue>\n";
 
 // ─── Last Known Location ──────────────────────────────────────────────────────
 
@@ -372,19 +384,19 @@ if (isset($metadata['last_coords_history'])) {
 
 
 if (isset($metadata['low_process_actors'])) {
-    
-    foreach ($metadata['low_process_actors'] as $gamets_lpa_processed=>$actorList) {
+
+    foreach ($metadata['low_process_actors'] as $gamets_lpa_processed => $actorList) {
         if ($gamets_lpa_processed <= $lastItGamets) {
             continue;
         }
-        $hoursAgo   = number_format(($last_gamets - $gamets_lpa_processed) * GAMETS_TO_HOURS, 2);
-
+        $hoursAgo = number_format(($last_gamets - $gamets_lpa_processed) * GAMETS_TO_HOURS, 2);
+        // actorList in the form of name
         $bgEvents[] = [
-            'gamets'  => $gamets_lpa_processed,
-            'content' => "Nearby actors {$GLOBALS['HERIKA_NAME']} can see: " . implode(", ", $actorList).", $hoursAgo hours ago",
-            'type'    => 'nearby_actors',
+            'gamets' => $gamets_lpa_processed,
+            'content' => "Nearby actors {$GLOBALS['HERIKA_NAME']} can see (refid,name): " . json_encode($actorList) . ", ($hoursAgo hours ago)",
+            'type' => 'nearby_actors',
         ];
-        
+
     }
 }
 
@@ -397,6 +409,7 @@ if ($LAST_REPORTED_LOCATION) {
         "SELECT gamets, content FROM rumors
          WHERE hold LIKE '%{$locationEsc}%' AND gamets > $rumorSinceTs"
     );
+    error_log("[BACKGROUND LIFE] LAST_REPORTED_LOCATION " . count($rumorRows) . " rumors near $LAST_REPORTED_LOCATION since gamets $rumorSinceTs");
     foreach ($rumorRows as $rumor) {
         $bgEvents[] = [
             'gamets' => $rumor['gamets'],
@@ -445,6 +458,11 @@ $systemPrompts = [
     'en' => [['role' => 'system', 'content' => 'You are a writing assistant. Examine this text containing events that occurred in the fictional universe of Skyrim (The Elder Scrolls).']],
 ];
 
+$noteAboutPlayer = $extdata['background_life_player_unattached']
+    ? ""
+    : "Important note: {$GLOBALS['PLAYER_NAME']} and {$GLOBALS['HERIKA_NAME']} are NOT in the same place after the <context_history> events.";
+
+
 $userPrompts = [
     'es' => <<<PROMPT_ES
 El personaje principal en este cuaderno de bitácora es {$GLOBALS['HERIKA_NAME']}.
@@ -459,8 +477,7 @@ Este soliloquio debería contener lo que el personaje podría haber hecho en est
 * Qué posibles sucesos/encuentros podrían haber sucedido.
 * Pensamientos íntimos.
 
-Nota importante: El personaje '{$GLOBALS['PLAYER_NAME']}' y {$GLOBALS['HERIKA_NAME']} están separados
-después de los hechos de <context_history>.
+$noteAboutPlayer
 Escribe en español, en un par de párrafos, un monólogo como si fueses {$GLOBALS['HERIKA_NAME']}
 en primera persona hablándose a sí misma/mismo.
 
@@ -476,9 +493,12 @@ Based on all this information, generate an inner-thought soliloquy for {$GLOBALS
 Take into account the <speech_style> section for the writing style, and particularly
 <inner_thought_guidance> if present.
 
-This soliloquy should reflect what the character might have done over the last {$daysPassed} day(s):
+This soliloquy should reflect what the character might have done over the last {$daysPassed} day(s), 
+and after last inner thoughts presented in the <context_history>:
+
 * Details of any set tasks.
 * Intimate thoughts.
+* Evolution of the character's state of mind based on latest inner thoughts (if any) and events.
 * Short (2 paragraphs max), concise, and focused on the character's perspective.
 
 Always respect the character's last known location. If the character is in a specific place,
@@ -486,8 +506,7 @@ generated content should occur in that area or its surroundings. The character m
 intention to travel elsewhere, but such travel should only be described as a future plan,
 not an immediate action.
 
-Important note: {$GLOBALS['PLAYER_NAME']} and {$GLOBALS['HERIKA_NAME']} are NOT in the same place
-after the <context_history> events.
+$noteAboutPlayer
 
 Write in English as if you were {$GLOBALS['HERIKA_NAME']}, in a soliloquy, speaking to yourself
 in first person.
@@ -499,12 +518,12 @@ in first person.
 At the end of the soliloquy, {$GLOBALS['HERIKA_NAME']} must decide her next step.
 
 She/He  may choose ONE of the following actions:
-* TravelTo(location)
-* FindNPC(NPC). Locate an NPC whose exact location is unknown. Use this before MoveTo or SpeakTo when the character does not know where the target is. 
-* MoveTo(NPC). Move to another NPC whose location is already known. 
-* SpeakTo(NPC). Engage in conversation with another NPC. (should be used before any BuyItems or SellItems action, to reflect the need to interact and agree on a transaction with the trader NPC)
-* BuyItems(NPC,itemid,count,gold_spent) Buy items from another NPC (if character interacts with a trader and has agreed a transaction before, this step is *needed* to update inventories)
-* SellItems(NPC,itemid,count,gold_received) Sells items to another NPC (if character interacts with a trader and has agreed a transaction before, this step is *needed* to update inventories)
+* TravelTo(<location_name>). Travel to a specific location/city. Use when the character wants to move to a new area.
+* FindNPC(<npc_name>). Locate an NPC whose exact location is unknown. Use this before MoveTo or SpeakTo when the character does not know where the target is. 
+* MoveTo(<npc_name>). Move to another NPC whose location is already known. 
+* SpeakTo(<npc_name>,<refid>). Engage in conversation with another NPC. (should be used before any BuyItems or SellItems action, to reflect the need to interact and agree on a transaction with the trader NPC) (specify the NPC's refid if known, otherwise use 0)
+* BuyItems(<npc_name>,<itemid>,<count>,<gold_spent>) Buy items from another NPC (if character interacts with a trader and has agreed a transaction before, this step is *needed* to update inventories)
+* SellItems(<npc_name>,<itemid>,<count>,<gold_received>) Sells items to another NPC (if character interacts with a trader and has agreed a transaction before, this step is *needed* to update inventories)
 * ReturnHome. Returns to base location to meet {$GLOBALS['PLAYER_NAME']}. Use when all goals are done.
 * SpreadRumor. Generate or spread a rumor related to the character's current location (e.g., if goal is to boost local trade, rumour about it).
 * StayAtPlace. Remains in current location. If gathering info or spreading rumors, stay ≥24 hours.   
@@ -529,7 +548,7 @@ If an action is chosen:
 
 <Action>
 Type: TravelTo | FindNPC | MoveTo | SpeakTo | BuyItems | SellItems | ReturnHome | SpreadRumor | StayAtPlace
-Target: <location name | NPC name | None>
+Target: <location name | NPC name,refid| NPC name | item id | ... | None>
 Reason: <brief justification>
 </Action>
 
@@ -590,7 +609,7 @@ $step2Content .= "Possible actions:\n"
     . "StayAtPlace — Remains in current location. If gathering info or spreading rumors, stay ≥24 hours.\n"
     . "FindNPC:NPC — Search for an NPC whose exact location is unknown (replace <NPC> with target NPC name). Use this before MoveTo or SpeakTo when the character does not know where the target is. Requires a clear reason.\n"
     . "MoveTo:NPC — Move to another NPC whose location is already known (replace <NPC> with target NPC name). Requires a clear reason.\n"
-    . "SpeakTo:NPC — Engage in conversation with another NPC (replace <NPC> with target NPC name). Requires a clear reason.\n"
+    . "SpeakTo:NPC:refid — Engage in conversation with another NPC (replace <NPC> with target NPC name). Requires a clear reason.\n"
     . "BuyItems:NPC:itemid:count:gold_spent — Buy items from another NPC (replace <NPC> with target NPC name). (if character {$GLOBALS['HERIKA_NAME']} interacts with a trader and has agreed a transaction before, this step is *needed* to update inventories)\n"
     . "SellItems:NPC:itemid:count:gold_earned — Sell items to another NPC (replace <NPC> with target NPC name). (if character {$GLOBALS['HERIKA_NAME']} interacts with a trader and has agreed a transaction before, this step is *needed* to update inventories)\n"
     . "ReturnHome       — Returns to base location to meet {$GLOBALS['PLAYER_NAME']}. Use when all goals are done.\n"
@@ -652,13 +671,14 @@ if ($isDryRun && $forceAction) {   // In dry-run mode (forceAction was enabled),
 $refHexString = convertSignedToUnsignedHex(hexdec($currentNpcData['refid']));
 
 // ─── Dispatch: Movement / Stay Action ────────────────────────────────────────
-$recordDiaryEntry=true;
+$recordDiaryEntry = true;
 if (!empty($parsed['action'])) {
     [$actionCmd, $actionArg] = array_pad(explode(':', $parsed['action'], 2), 2, null);
     error_log("[BGL] Chosen action: $actionCmd, argument: $actionArg");
     switch ($actionCmd) {
         case 'TravelTo':
             handleTravelToAction($actionArg, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $lastEventParsed, $db);
+            unset($parsed['rumor']);   // Prevent rumor dispatch if MoveTo action is chosen
             break;
         case 'StayAtPlace':
             handleStayAtPlaceAction($LAST_REPORTED_LOCATION, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $db);
@@ -671,21 +691,21 @@ if (!empty($parsed['action'])) {
             handleFindNPCAction($actionArg, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $db, $LAST_REPORTED_LOCATION);
             unset($parsed['notification']);   // Prevent letter dispatch if FindNPC action is chosen
             unset($parsed['rumor']);   // Prevent rumor dispatch if FindNPC action is chosen
-            $recordDiaryEntry=false;
+            $recordDiaryEntry = false;
             break;
         case 'MoveTo':
             handleMoveToAction($actionArg, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $db);
             unset($parsed['notification']);   // Prevent letter dispatch if MoveTo action is chosen
             unset($parsed['rumor']);   // Prevent rumor dispatch if MoveTo action is chosen
-            $recordDiaryEntry=false;
+            $recordDiaryEntry = false;
             break;
         case 'SpeakTo':
             $historyWithInnerThought = $history
                 . "\n\n<inner_thought>\n{$innerThoughtBuffer}\n</inner_thought>\n";
-            handleSpeakToAction($actionArg, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $db, $connectionHandler, $dynamicBiography, $historyWithInnerThought,$lastEventParsed['location']);
+            handleSpeakToAction($actionArg, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $db, $connectionHandler, $dynamicBiography, $historyWithInnerThought, $lastEventParsed['location']);
             unset($parsed['notification']);   // Prevent letter dispatch if SpeakTo action is chosen
             //unset($parsed['rumor']);   // Prevent rumor dispatch if SpeakTo action is chosen
-            $recordDiaryEntry=false;
+            $recordDiaryEntry = false;
             break;
         case 'BuyItems':
         case 'SellItems':
@@ -694,15 +714,17 @@ if (!empty($parsed['action'])) {
             $tradeEntries = explode(';', $parsed['action']);
             foreach ($tradeEntries as $tradeEntry) {
                 $tradeEntry = trim($tradeEntry);
-                if ($tradeEntry === '') continue;
+                if ($tradeEntry === '')
+                    continue;
                 [$tradeCmd, $tradeArg] = array_pad(explode(':', $tradeEntry, 2), 2, null);
                 $tradeCmd = trim($tradeCmd);
-                if ($tradeCmd !== 'BuyItems' && $tradeCmd !== 'SellItems') continue;
+                if ($tradeCmd !== 'BuyItems' && $tradeCmd !== 'SellItems')
+                    continue;
                 handleTradeItemsAction($tradeCmd, $tradeArg, $currentNpcData, $GLOBALS['HERIKA_NAME'], $last_ts, $last_gamets, $momentum, $db);
             }
             unset($parsed['notification']);
-            //unset($parsed['rumor']);
-            $recordDiaryEntry=false;
+            unset($parsed['rumor']);
+            $recordDiaryEntry = false;
             break;
     }
 }

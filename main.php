@@ -43,6 +43,7 @@ require_once($path . "lib/memory_helper_vectordb.php");
 require_once($path . "lib/llm_randomizer.php");
 require_once($path . "lib/utils_game_timestamp.php");
 require_once($path . "lib/logger.php"); 
+require_once($path . "lib/chim_quest_engine.php");
 requireFilesRecursively(__DIR__."/ext/","globals.php");
 
 // New profile system
@@ -189,7 +190,7 @@ if (in_array($gameRequest[0],["inputtext","inputtext_s","ginputtext","ginputtext
 }
 
 
-$fast_commands = ["addnpc","updateprofile","updateprofile_narrator","diary","diary_narrator","diary_player","_quest","setconf","request","_speech","infoloc","infonpc","infonpc_close",
+$fast_commands = ["addnpc","addbgnpc","updateprofile","updateprofile_narrator","diary","diary_narrator","diary_player","_quest","setconf","request","_speech","infoloc","infonpc","infonpc_close",
     "infoaction","status_msg","delete_event","itemfound","_questdata","_uquest","location","_questreset","chat","bleedout","waitstart","waitstop",
     "util_location_name","util_faction_name","spellcast","npcspellcast","updateprofiles_batch_async","core_profile_assign","switchrace","combatbark",
     "util_location_npc","enable_bg","region","named_cell","snqe","named_cell_static","player_menu_tts_prefetch","player_menu_tts_play"];
@@ -2016,6 +2017,15 @@ if (in_array($gameRequest[0],["rechat","narration"]) ) {
         
         // MinAI prompts are breaking rechat actor adressing "Respond to #target# as #herika_name#"
         $GLOBALS['action_prompts']=[];
+        $rechatEnabledFunctionSet=array_fill_keys($GLOBALS["ENABLED_FUNCTIONS"] ?? [], true);
+        $rechatActionSourceCodes=[
+            "TradeItems"=>"OpenInventory",
+        ];
+        $rechatActionWasEnabled=function ($functionCode) use ($rechatEnabledFunctionSet, $rechatActionSourceCodes) {
+            $sourceCode=$rechatActionSourceCodes[$functionCode] ?? $functionCode;
+            return isset($rechatEnabledFunctionSet[$sourceCode]);
+        };
+
         // Unset some functions here.
        
         unsetFunction("OpenInventory");
@@ -2030,15 +2040,17 @@ if (in_array($gameRequest[0],["rechat","narration"]) ) {
         // Change name of functions here
         // Function clone and renaming
         // ExchangeItems (trade with player) will be modified to TradeItems (roleplayed trade)
-        $NEWFUNCTION=$GLOBALS["BASE_FUNCTIONS"]["OpenInventory"];
-        $NEWFUNCTION["name"]="TradeItems";
-        $NEWFUNCTION["description"]="{$GLOBALS["HERIKA_NAME"]} trade items with another actor. Amount and item will be infered from dialogue, so no need to specify";
-        $NEWFUNCTION["parameters"]["properties"]["target"]["description"]="Actor name to trade with";
-        $GLOBALS["FUNCTIONS"][]=$NEWFUNCTION;
-        $GLOBALS["ENABLED_FUNCTIONS"][]="TradeItems";
-        $GLOBALS["F_NAMES"]["TradeItems"]="TradeItems";
+        if ($rechatActionWasEnabled("TradeItems") && isset($GLOBALS["BASE_FUNCTIONS"]["OpenInventory"])) {
+            $NEWFUNCTION=$GLOBALS["BASE_FUNCTIONS"]["OpenInventory"];
+            $NEWFUNCTION["name"]="TradeItems";
+            $NEWFUNCTION["description"]="{$GLOBALS["HERIKA_NAME"]} trade items with another actor. Amount and item will be infered from dialogue, so no need to specify";
+            $NEWFUNCTION["parameters"]["properties"]["target"]["description"]="Actor name to trade with";
+            $GLOBALS["FUNCTIONS"][]=$NEWFUNCTION;
+            $GLOBALS["ENABLED_FUNCTIONS"][]="TradeItems";
+            $GLOBALS["F_NAMES"]["TradeItems"]="TradeItems";
+        }
 
-        if ($GLOBALS["IS_NPC"]) {
+        if ($GLOBALS["IS_NPC"] && $rechatActionWasEnabled("TravelTo") && isset($GLOBALS["BASE_FUNCTIONS"]["TravelTo"])) {
             // TravelTo (lead the way to for player) will be modified to TravelTo (TravelTo) if no follower
             $NEWFUNCTION=$GLOBALS["BASE_FUNCTIONS"]["TravelTo"];
             $NEWFUNCTION["name"]="TravelTo";
@@ -2053,7 +2065,23 @@ if (in_array($gameRequest[0],["rechat","narration"]) ) {
 
         }
 
+        $GLOBALS["ENABLED_FUNCTIONS"]=array_values(array_unique(array_filter(
+            $GLOBALS["ENABLED_FUNCTIONS"] ?? [],
+            function ($functionCode) use ($rechatActionWasEnabled) {
+                return $rechatActionWasEnabled($functionCode);
+            }
+        )));
 
+        $GLOBALS["FUNCTIONS"]=array_values(array_filter(
+            $GLOBALS["FUNCTIONS"] ?? [],
+            function ($functionEntry) use ($rechatActionWasEnabled) {
+                if (!is_array($functionEntry) || empty($functionEntry["name"])) {
+                    return false;
+                }
+                $functionCode=getFunctionCodeName($functionEntry["name"]);
+                return $functionCode !== false && $rechatActionWasEnabled($functionCode);
+            }
+        ));
        
     }
 }
@@ -2284,6 +2312,13 @@ if ($gameRequest[0] === "vision") {
     $GLOBALS["COMMAND_PROMPT"] = "Respond with atmospheric narration only. Use the Talk action.";
 }
 
+if (function_exists('chimQuestEngineApplyActionSuppressionsForTurn')) {
+    chimQuestEngineApplyActionSuppressionsForTurn(
+        $GLOBALS["HERIKA_NAME"] ?? '',
+        $GLOBALS["CACHE_LOCATION"] ?? ''
+    );
+}
+
 // Ensure actions and nearby sections are added to PROMPT_HEAD before building system prompt
 require_once(__DIR__.DIRECTORY_SEPARATOR."functions".DIRECTORY_SEPARATOR."json_response.php");
 
@@ -2356,17 +2391,37 @@ if (isset($GLOBALS["PROMPT_NEARBY_SECTIONS"])) {
     $nearbySections = $GLOBALS["PROMPT_NEARBY_SECTIONS"];
 }
 
+$promptInjectionContext = [
+    "game_request" => $gameRequest,
+    "herika_name" => $GLOBALS["HERIKA_NAME"] ?? "",
+    "player_name" => $GLOBALS["PLAYER_NAME"] ?? "",
+];
+$characterBottomInjections = function_exists('chimRenderPromptInjections')
+    ? chimRenderPromptInjections("character_bottom", $promptInjectionContext)
+    : "";
+$promptBottomInjections = function_exists('chimRenderPromptInjections')
+    ? chimRenderPromptInjections("prompt_bottom", $promptInjectionContext)
+    : "";
+
 $knowledgeSection = "";
+$questContext = chimQuestEngineBuildPromptContext(
+    $GLOBALS["HERIKA_NAME"] ?? '',
+    $GLOBALS["CACHE_LOCATION"] ?? ''
+);
+if ($questContext !== '') {
+    $dynamicBiography .= $questContext;
+}
+
 if (!empty($GLOBALS["OGHMA_HINT"])) {
     $knowledgeSection = "\n\n<knowledge>\n" . $GLOBALS["OGHMA_HINT"] . "\n</knowledge>";
 }
 
 $systemPromptRaw = "<roleplay_instructions>\n" . $GLOBALS["PROMPT_HEAD"] .
     "\n</roleplay_instructions>" . $worldPrompt .
-    "\n\n<character>\n" . $GLOBALS["HERIKA_PERS"] . $dynamicBiography .
+    "\n\n<character>\n" . $GLOBALS["HERIKA_PERS"] . $dynamicBiography . $characterBottomInjections .
     "\n</character>" . $knowledgeSection .
     "\n\n<general_instructions>\n" . $GLOBALS["COMMAND_PROMPT"] .
-    "\n</general_instructions>" . $actionsList . $nearbySections . $paralinguisticTagsPrompt .
+    "\n</general_instructions>" . $actionsList . $nearbySections . $promptBottomInjections . $paralinguisticTagsPrompt .
     "\n" . $rumorsText . "\n";
 
 $systemPrompt = chimFormatPromptXmlSections(
