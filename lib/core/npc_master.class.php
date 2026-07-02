@@ -819,7 +819,7 @@ class NpcMaster
         // ALWAYS reset identity/bio globals from THIS NPC's own row (coalesce NULL -> ''), never leave the
         // previous NPC's value in place. A generic/bio-less NPC (e.g. an unnamed "Breton") has NULL profile
         // fields; the old `if (isset())` guards skipped the assignment on NULL, so the global retained the
-        // last-processed NPC's data and the bio-less NPC spoke as them (the "Breton talking like Vivienne Onis"
+        // last-processed NPC's data and the bio-less NPC spoke as them (the cross-NPC identity bleed
         // bleed). Mirrors the per-NPC reset already done for HERIKA_RELATIONSHIPS below.
         $GLOBALS['HERIKA_BACKGROUND']  = $currentNpcData['npc_static_bio'] ?? '';
         $GLOBALS['OGHMA_KNOWLEDGE']    = $currentNpcData['oghma_knowledge_tags'] ?? '';

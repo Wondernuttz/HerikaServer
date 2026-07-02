@@ -1327,7 +1327,7 @@ PROMPT;
 
             // ROMANTIC AUTO-PROMOTION GUARD (user directive): the relationship model must NOT unilaterally promote a
             // non-romantic relationship INTO a romantic-leaning type (e.g. professional -> crush in one interaction,
-            // as logged for Lisette). Romantic types are earned / player-set in the relationship editor, never
+            //). Romantic types are earned / player-set in the relationship editor, never
             // auto-assigned by the model. Affinity + notes still update; only the romantic TYPE jump is blocked.
             // Downgrades OUT of romantic and moves between non-romantic types are unaffected.
             $romanticTypes = ['romantic', 'crush', 'admirer', 'obsessed', 'infatuated', 'lover'];
