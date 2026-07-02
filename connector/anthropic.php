@@ -55,14 +55,22 @@ class anthropic
             }
         }
 
+        $model = (isset($GLOBALS["CONNECTOR"][$this->name]["model"])) ? $GLOBALS["CONNECTOR"][$this->name]["model"] : 'claude-3-haiku-20240307';
+
+        // Fable 5 / Mythos 5 / Opus 4.7+ reject temperature, top_p, and top_k with a 400.
+        $noSamplingParams = (bool) preg_match('/^claude-(fable|mythos|opus-4-[78])/', $model);
+
         $data = array(
-            'model' => (isset($GLOBALS["CONNECTOR"][$this->name]["model"])) ? $GLOBALS["CONNECTOR"][$this->name]["model"] : 'claude-3-haiku-20240307',
+            'model' => $model,
             'messages' => $processedMessages,
             'stream' => true,
             'max_tokens' => $MAX_TOKENS,
-            'temperature' => ($GLOBALS["CONNECTOR"][$this->name]["temperature"]) ?: 1,
-            'top_p' => ($GLOBALS["CONNECTOR"][$this->name]["top_p"]) ?: 1,
         );
+
+        if (!$noSamplingParams) {
+            $data['temperature'] = ($GLOBALS["CONNECTOR"][$this->name]["temperature"]) ?: 1;
+            $data['top_p'] = ($GLOBALS["CONNECTOR"][$this->name]["top_p"]) ?: 1;
+        }
 
         if ($systemMessage !== null) {
             $data['system'] = $systemMessage;

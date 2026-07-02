@@ -210,6 +210,20 @@ if (!empty($GLOBALS["HERIKA_ID"])) {
     }
 }
 
+// RELATIONSHIP LOCK (user directive 2026-06-30): if this NPC's relationships are locked in the editor, the model must
+// NOT re-evaluate or overwrite them - manual edits are authoritative. This is why hand-edited relationships kept
+// reverting: the model re-classified them every interaction. Locked NPCs are skipped entirely.
+if ($npcId) {
+    $relLockRow = $GLOBALS["db"]->fetchOne("SELECT extended_data FROM core_npc_master WHERE id = " . (int)$npcId . " LIMIT 1");
+    if ($relLockRow && !empty($relLockRow['extended_data'])) {
+        $relLockExt = json_decode((string)$relLockRow['extended_data'], true);
+        if (is_array($relLockExt) && !empty($relLockExt['relationships_locked'])) {
+            Logger::info("[REL] {$npcName} relationships are LOCKED in the editor - skipping AI re-evaluation (manual edits preserved)");
+            return;
+        }
+    }
+}
+
 // Check if RelationshipLLM is configured
 $useRelLLM = !empty($GLOBALS['RELLLM_CONNECTOR']) && $GLOBALS['RELLLM_CONNECTOR'] > 0;
 
