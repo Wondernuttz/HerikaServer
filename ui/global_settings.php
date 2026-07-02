@@ -373,7 +373,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_all'])) {
     }
 
     // Worst-memory lifespan: rendered inline on the Relationship Management card (not in $gsSections), so save it here.
-    // (Local feature kept across the 2026-07-02 upstream merge.)
     $worstMemDays = normalize_posted_value('integer', $_POST['PLAYER_WORST_MEMORY_GAME_DAYS'] ?? '');
     if (!chimSetGeneralSetting('PLAYER_WORST_MEMORY_GAME_DAYS', $worstMemDays, current_description('PLAYER_WORST_MEMORY_GAME_DAYS', $generalSettingRowMap))) {
         $didSave = false;

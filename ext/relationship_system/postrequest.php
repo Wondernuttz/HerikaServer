@@ -210,7 +210,7 @@ if (!empty($GLOBALS["HERIKA_ID"])) {
     }
 }
 
-// RELATIONSHIP LOCK (user directive 2026-06-30): if this NPC's relationships are locked in the editor, the model must
+// RELATIONSHIP LOCK: if this NPC's relationships are locked in the editor, the model must
 // NOT re-evaluate or overwrite them - manual edits are authoritative. This is why hand-edited relationships kept
 // reverting: the model re-classified them every interaction. Locked NPCs are skipped entirely.
 if ($npcId) {

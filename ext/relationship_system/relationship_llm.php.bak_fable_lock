@@ -136,53 +136,6 @@ class RelationshipLLM {
      * NOTE: Does NOT call setOldGlobals() here - that happens in makeSafeRequest()
      * to avoid corrupting the main chat connector's globals
      */
-    // Extension-provided character facts. Extensions register fact sources in
-    // conf_opts id='chim_character_facts_sources' (JSON array of
-    // {table, name_column, facts:{label: sql_expression}, skip_values:{label:[values]}}).
-    // Data-driven (no code hooks) so the standalone worker daemon sees registrations too.
-    // No registrations -> empty string; unknown tables/columns fail silently per source.
-    private function extensionCharacterFacts($npcName) {
-        try {
-            if (empty($GLOBALS['db']) || (string)$npcName === '') { return ''; }
-            static $sources = null;
-            if ($sources === null) {
-                $sources = [];
-                $row = $GLOBALS['db']->fetchOne("SELECT value FROM conf_opts WHERE id = 'chim_character_facts_sources'");
-                if ($row && !empty($row['value'])) {
-                    $decoded = json_decode($row['value'], true);
-                    if (is_array($decoded)) { $sources = $decoded; }
-                }
-            }
-            if (empty($sources)) { return ''; }
-            $bits = [];
-            $e = $GLOBALS['db']->escape($npcName);
-            foreach ($sources as $src) {
-                $table = preg_replace('/[^a-zA-Z0-9_]/', '', (string)($src['table'] ?? ''));
-                $nameCol = preg_replace('/[^a-zA-Z0-9_]/', '', (string)($src['name_column'] ?? ''));
-                $facts = is_array($src['facts'] ?? null) ? $src['facts'] : [];
-                if ($table === '' || $nameCol === '' || empty($facts)) { continue; }
-                $selects = [];
-                $i = 0;
-                $aliasByLabel = [];
-                foreach ($facts as $label => $expr) {
-                    $alias = 'f' . $i++;
-                    $aliasByLabel[$label] = $alias;
-                    $selects[] = "({$expr}) AS {$alias}";
-                }
-                $frow = $GLOBALS['db']->fetchOne("SELECT " . implode(', ', $selects) . " FROM {$table} WHERE {$nameCol} = '{$e}'");
-                if (!$frow) { continue; }
-                $skip = is_array($src['skip_values'] ?? null) ? $src['skip_values'] : [];
-                foreach ($aliasByLabel as $label => $alias) {
-                    $val = trim((string)($frow[$alias] ?? ''));
-                    if ($val === '') { continue; }
-                    if (isset($skip[$label]) && in_array(strtolower($val), array_map('strtolower', (array)$skip[$label]), true)) { continue; }
-                    $bits[] = "{$label}: {$val}";
-                }
-            }
-            if (!$bits) { return ''; }
-            return "Character facts for {$npcName} (persistent profile - respect these when judging relationship changes): " . implode('; ', $bits) . "\n";
-        } catch (\Throwable $t) { return ''; }
-    }
     private function initConnector() {
         require_once $GLOBALS['ENGINE_PATH'] . "lib/core/llm_connector.class.php";
 
@@ -342,7 +295,6 @@ class RelationshipLLM {
         if (!empty($npc['race'])) {
             $npcContext .= "Race: " . $npc['race'] . "\n";
         }
-        $npcContext .= $this->extensionCharacterFacts($npcName); // extension character facts (see extensionCharacterFacts)
 
         // Build prompt
         $systemPrompt = $this->getAnalysisPrompt($playerName);
@@ -523,13 +475,6 @@ PROMPT;
             if ($extended === null) {
                 // CRITICAL: Corrupted data - abort to prevent data loss
                 Logger::error("[REL-LLM] ABORT: saveRelationships for {$npc['npc_name']} - corrupted extended_data");
-                $this->releaseNpcLock($npcId);
-                return false;
-            }
-            // USER LOCK: the editor lock checkbox was only honored by postrequest - this path
-            // kept overwriting manual UI edits. Locked NPCs are user-curated; never machine-write their map.
-            if (!empty($extended['relationships_locked'])) {
-                Logger::info("[REL-LLM] SKIP saveRelationships for {$npc['npc_name']} - relationships_locked (manual edits protected)");
                 $this->releaseNpcLock($npcId);
                 return false;
             }
@@ -783,7 +728,6 @@ PROMPT;
 
         // Build context string
         $contextStr = "";
-        $contextStr .= $this->extensionCharacterFacts($npcName); // extension character facts
 
         // Director instruction context (rolemaster guidance)
         // This explains why an NPC might behave in ways that seem out of character
@@ -1009,8 +953,6 @@ PROMPT;
 
         // Build context string
         $contextStr = "";
-        $contextStr .= $this->extensionCharacterFacts($speakerName);  // extension character facts, both parties
-        $contextStr .= $this->extensionCharacterFacts($listenerName);
 
         // Director instruction context (rolemaster guidance)
         if (!empty($context['director_instruction'])) {
@@ -1436,13 +1378,6 @@ PROMPT;
                 if ($extended === null) {
                     // CRITICAL: Corrupted data - abort to prevent data loss
                     Logger::error("[REL-LLM] ABORT: applyChanges for {$npc['npc_name']} - corrupted extended_data");
-                    $this->releaseNpcLock($npcId);
-                    return []; // Return empty - changes not saved
-                }
-                // USER LOCK: honor the editor lock here too - this eval/rebase path was the
-                // writer clobbering manual UI edits minutes after they were saved.
-                if (!empty($extended['relationships_locked'])) {
-                    Logger::info("[REL-LLM] SKIP applyChanges for {$npc['npc_name']} - relationships_locked (manual edits protected)");
                     $this->releaseNpcLock($npcId);
                     return []; // Return empty - changes not saved
                 }
