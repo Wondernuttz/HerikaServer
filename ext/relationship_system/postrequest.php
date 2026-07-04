@@ -271,6 +271,12 @@ if ($useRelLLM && $npcId) {
         Logger::debug("[REL-DEBUG] Captured director instruction: " . substr($gameRequest[3], 0, 100));
     }
 
+    // Arousal pacing decline (NSFW ext): a low-arousal "warm me up" refusal is about timing, not dislike.
+    if (!empty($GLOBALS['AIAGENTNSFW_AROUSAL_PACING_DECLINE'])) {
+        $context['pacing_note'] = true;
+        Logger::debug("[REL-DEBUG] Arousal pacing decline flagged - eval told not to penalize the refusal");
+    }
+
     // Nearby NPCs (loaded AI agents) - for filtering relationship context
     if (!empty($GLOBALS["CACHE_PEOPLE"])) {
         $context['nearby_npcs'] = array_map('trim', explode(',', $GLOBALS["CACHE_PEOPLE"]));

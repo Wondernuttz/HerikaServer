@@ -805,6 +805,11 @@ PROMPT;
             $contextStr .= "Attribute the behavior to following instructions, not to genuine feelings toward the other party.\n\n";
         }
 
+        // Arousal pacing: a low-arousal decline is about readiness, not dislike.
+        if (!empty($context['pacing_note'])) {
+            $contextStr .= "⚠ PACING NOTE: If the NPC declined or deferred intimacy this exchange, it was pacing ('not yet'), NOT dislike or rejection. Do not lower affinity or trust for that refusal, and do not read it as a defining negative moment.\n\n";
+        }
+
         // Recent events
         if (!empty($context['events'])) {
             $contextStr .= "Recent Events:\n" . implode("\n", array_slice($context['events'], -10)) . "\n\n";
@@ -1033,6 +1038,11 @@ PROMPT;
             $contextStr .= "⚠ DIRECTOR INSTRUCTION (game master guidance that prompted this response):\n";
             $contextStr .= "\"" . $context['director_instruction'] . "\"\n";
             $contextStr .= "NOTE: The speaker's behavior was DIRECTED by the game master, not driven by genuine feelings.\n\n";
+        }
+
+        // Arousal pacing: a low-arousal decline is about readiness, not dislike.
+        if (!empty($context['pacing_note'])) {
+            $contextStr .= "⚠ PACING NOTE: If the speaker declined or deferred intimacy this exchange, it was pacing ('not yet'), NOT dislike or rejection. Do not lower affinity or trust for that refusal, and do not read it as a defining negative moment.\n\n";
         }
 
         if (!empty($context['events'])) {
