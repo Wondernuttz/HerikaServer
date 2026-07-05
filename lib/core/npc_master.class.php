@@ -150,50 +150,6 @@ if (!function_exists('herikaResolveNpcRolemasterState')) {
     }
 }
 
-if (!function_exists('chimRelationshipTimelineStamp')) {
-    // Timeline safety for relationship writes (fix 2026-07-05; tester lost every 100-affinity bond
-    // overnight). Relationship progress previously lived ONLY in the live row between infosave
-    // backups: rows were never gamets-stamped (so the restore paradox-clear treated them as
-    // "future" data) and never snapshotted (so a save-load restored pre-grind state).
-    // 1) stamp gamets_last_updated with the current game time so the row sits on the timeline;
-    // 2) drop a THROTTLED history snapshot (once per NPC per 30 real minutes, cross-process via
-    //    the history table itself) so the progress is restorable like any other profile state.
-    function chimRelationshipTimelineStamp($npcId)
-    {
-        try {
-            $npcId = (int) $npcId;
-            if ($npcId <= 0 || !isset($GLOBALS['db'])) {
-                return;
-            }
-            $g = 0;
-            if (isset($GLOBALS['gameRequest'][2]) && is_numeric($GLOBALS['gameRequest'][2])) {
-                $g = (float) $GLOBALS['gameRequest'][2];
-            } elseif (function_exists('DataLastKnownGameTS')) {
-                $g = (float) DataLastKnownGameTS();
-            }
-            if ($g > 0) {
-                $GLOBALS['db']->execQuery("UPDATE core_npc_master SET gamets_last_updated = {$g} WHERE id = {$npcId}");
-            }
-            static $lastSnap = [];
-            $now = time();
-            if (($lastSnap[$npcId] ?? 0) > $now - 1800) {
-                return;
-            }
-            $row = $GLOBALS['db']->fetchOne("SELECT extract(epoch from created) AS e FROM core_npc_master_history WHERE npc_id = {$npcId} ORDER BY created DESC LIMIT 1");
-            if ($row && (float) ($row['e'] ?? 0) > $now - 1800) {
-                $lastSnap[$npcId] = $now;
-                return;
-            }
-            $nm = new NpcMaster();
-            $nm->backupNpcById($npcId);
-            $lastSnap[$npcId] = $now;
-            error_log("[REL] Timeline snapshot for npc_id {$npcId} (relationship progress persisted to history)");
-        } catch (Exception $e) {
-            error_log("[REL] Timeline stamp failed for npc_id " . (int) $npcId . ": " . $e->getMessage());
-        }
-    }
-}
-
 if (!function_exists('chimRunWithRelationshipExtendedDataWrite')) {
     function chimRunWithRelationshipExtendedDataWrite($callback)
     {
@@ -1273,11 +1229,6 @@ FROM restore
         // RELATIONSHIP SYSTEM: Clear "future" relationship data from NPCs that weren't restored
         // NPCs added AFTER the save timestamp don't have history entries, so they keep their
         // current (future) state. We need to clear their relationship data to prevent paradoxes.
-        // FIX 2026-07-05: the NULL bucket is GONE - an unstamped row is not evidence of future
-        // data, and wiping on NULL nuked every relationship the stamp never reached (testers lost
-        // all bonds between sessions). Only a stamp PROVABLY past the loaded save is future data.
-        // Locked profiles and locked relationship cards are never wiped here either - the locked
-        // rollback above already handles their timeline correctly.
         $rel_reset_q = "UPDATE public.core_npc_master
             SET extended_data = extended_data
                 - 'relationships'
@@ -1288,11 +1239,9 @@ FROM restore
                 - 'relationships_updated'
                 - '_chim_history_source'
             WHERE npc_name <> 'The Narrator'
-              AND gamets_last_updated > $timestamp
-              AND COALESCE(lock_profile, 0) = 0
+              AND (gamets_last_updated > $timestamp OR gamets_last_updated IS NULL)
               AND extended_data IS NOT NULL
-              AND extended_data ? 'relationships'
-              AND COALESCE(extended_data->>'relationships_locked','') NOT IN ('1','true')";
+              AND extended_data ? 'relationships'";
 
         try {
             $GLOBALS["db"]->execQuery($rel_reset_q);
