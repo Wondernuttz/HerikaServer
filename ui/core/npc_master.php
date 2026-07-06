@@ -3642,7 +3642,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && isset($_POST['import_from_bio'])) {
               <span>Build advanced relationship connections</span>
               <div style="font-size:0.75em; color:#7a8a9a; margin-top:4px; line-height:1.4;">
                 Creates indirect opinions based on social networks.<br>
-                <em>Example: If Eris loves Vivienne (+80) and Vivienne hates a bandit (-70), Eris becomes wary of that bandit too.</em>
+                <em>Example: If Eris loves Jordis (+80) and Jordis hates a bandit (-70), Eris becomes wary of that bandit too.</em>
               </div>
             </div>
           </label>
