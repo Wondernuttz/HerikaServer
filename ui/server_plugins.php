@@ -10,6 +10,7 @@ chimRuntimeBootstrap($enginePath, [
 ]);
 
 require_once($enginePath . "lib" . DIRECTORY_SEPARATOR . "logger.php");
+require_once($enginePath . "lib" . DIRECTORY_SEPARATOR . "core" . DIRECTORY_SEPARATOR . "plugin_installer.php");
 
 // Determine web root (match other pages)
 $scriptPath = $_SERVER['SCRIPT_NAME'];
@@ -206,6 +207,12 @@ tr:hover td {
                     }
                     $branch = (string)($channelConfig['branch'] ?? $channelId);
                     $label = (string)($channelConfig['label'] ?? ucfirst((string)$channelId));
+                    $packageSource = (string)($channelConfig['package_source'] ?? '');
+                    if ($packageSource === '') {
+                        $packageSource = (!in_array($channelId, ['main', 'live', 'stable'], true) && $branch !== '')
+                            ? 'branch'
+                            : 'release';
+                    }
                     $manifestUrl = (string)($channelConfig['manifest_url'] ?? '');
                     if ($manifestUrl === '' && $branch !== '') {
                         $manifestUrl = "https://raw.githubusercontent.com/{$gitRepo}/{$branch}/manifest.json";
@@ -216,11 +223,19 @@ tr:hover td {
                         '<channel>' => (string)$channelId,
                         '<branch>' => $branch,
                     ]);
+                    $releaseApiUrl = strtr((string)($channelConfig['release_api_url'] ?? ''), [
+                        '<package>' => $packageName,
+                        '<repo>' => $gitRepo,
+                        '<channel>' => (string)$channelId,
+                        '<branch>' => $branch,
+                    ]);
                     $channels[(string)$channelId] = [
                         'id' => (string)$channelId,
                         'label' => $label,
                         'branch' => $branch,
+                        'package_source' => $packageSource,
                         'manifest_url' => $manifestUrl,
+                        'release_api_url' => $releaseApiUrl,
                         'allow_force' => (bool)($channelConfig['allow_force'] ?? ($channelId !== 'main')),
                     ];
                 }
@@ -231,7 +246,9 @@ tr:hover td {
                     'id' => 'main',
                     'label' => 'Live',
                     'branch' => '',
+                    'package_source' => 'release',
                     'manifest_url' => "https://api.github.com/repos/{$gitRepo}/contents/manifest.json",
+                    'release_api_url' => "https://api.github.com/repos/{$gitRepo}/releases/latest",
                     'allow_force' => false,
                 ];
             }
@@ -239,6 +256,17 @@ tr:hover td {
         }
 
         function getPluginManagerChannelVersion($gitRepo, $channel) {
+            if (($channel['package_source'] ?? '') === 'release') {
+                $releaseApiUrl = (string)($channel['release_api_url'] ?? '');
+                if ($releaseApiUrl === '') {
+                    $releaseApiUrl = "https://api.github.com/repos/{$gitRepo}/releases/latest";
+                }
+                $releaseJson = fetchPluginManagerUrl($releaseApiUrl);
+                $release = $releaseJson !== false ? json_decode($releaseJson, true) : false;
+                return is_array($release) && !empty($release['tag_name'])
+                    ? chimPluginInstallerNormalizeReleaseVersion($release['tag_name'])
+                    : '';
+            }
             if (!empty($channel['manifest_url'])) {
                 return getPluginManagerManifestVersionFromUrl($channel['manifest_url']);
             }
@@ -251,27 +279,20 @@ tr:hover td {
         function findPluginRepositoryEntry($pluginRepository, $manifest, $folder) {
             $manifestName = $manifest['name'] ?? $folder;
             $manifestRepo = $manifest['git_repo'] ?? '';
-            foreach ($pluginRepository as $pluginId => $plugin) {
-                if (!is_array($plugin)) {
-                    continue;
-                }
-                if (($manifestRepo !== '' && ($plugin['git_repo'] ?? '') === $manifestRepo) || (($plugin['name'] ?? '') === $manifestName)) {
-                    $plugin['_plugin_id'] = $pluginId;
-                    return $plugin;
-                }
-            }
-            return false;
+            return chimPluginInstallerFindTrustedCatalogEntry(
+                $pluginRepository,
+                '',
+                (string)$manifestName,
+                (string)$manifestRepo,
+                false
+            );
         }
 
         function buildPluginInstallerUrl($pluginId, $packageName, $gitRepo, $channelId = 'main', $force = false) {
             $params = [
-                'PACKAGE_NAME' => $packageName,
-                'GITHUB_REPO' => $gitRepo,
+                'PLUGIN_ID' => $pluginId,
                 'CHANNEL' => $channelId,
             ];
-            if ($pluginId !== '') {
-                $params['PLUGIN_ID'] = $pluginId;
-            }
             if ($force) {
                 $params['FORCE'] = '1';
             }
@@ -290,13 +311,17 @@ tr:hover td {
 
         // Handle POST actions
         if (isset($_POST['delete_plugin'])) {
-            $pluginToDelete = $_POST['delete_plugin'];
-            $pluginPath = __DIR__ . '/../ext/' . $pluginToDelete;
-            if (is_dir($pluginPath)) {
-                rrmdir($pluginPath);
-                $successMessage = "Plugin '" . htmlspecialchars($pluginToDelete) . "' has been deleted.";
-            } else {
-                $errorMessage = "Plugin '" . htmlspecialchars($pluginToDelete) . "' not found.";
+            $pluginToDelete = (string)$_POST['delete_plugin'];
+            try {
+                $pluginPath = chimPluginInstallerResolveDirectChild(__DIR__ . '/../ext', $pluginToDelete);
+                if (is_dir($pluginPath)) {
+                    chimPluginInstallerDeletePath($pluginPath, true);
+                    $successMessage = "Plugin '" . htmlspecialchars($pluginToDelete) . "' has been deleted.";
+                } else {
+                    $errorMessage = "Plugin '" . htmlspecialchars($pluginToDelete) . "' not found.";
+                }
+            } catch (Throwable $e) {
+                $errorMessage = "Plugin delete request was rejected.";
             }
             header('Location: ' . $_SERVER['REQUEST_URI']);
             exit;
@@ -373,8 +398,22 @@ tr:hover td {
                 $modDownloadUrl = !empty($manifest['mod_download_url']) ? strtr($manifest['mod_download_url'],["<version>"=>"{$manifest['version']}"]) : '';
                 $repositoryEntry = findPluginRepositoryEntry($pluginRepository, $manifest, $folder);
                 $pluginId = is_array($repositoryEntry) ? (string)($repositoryEntry['_plugin_id'] ?? '') : '';
-                $channelSource = is_array($repositoryEntry) ? $repositoryEntry : $manifest;
-                $channels = !empty($gitRepo) ? normalizePluginManagerChannels($channelSource, $name, $gitRepo) : [];
+                if (is_array($repositoryEntry)) {
+                    // Catalog metadata is authoritative even when an installed
+                    // manifest still names an obsolete fork.
+                    $name = (string)($repositoryEntry['name'] ?? $name);
+                    $description = (string)($repositoryEntry['description'] ?? $description);
+                    $gitRepo = (string)($repositoryEntry['git_repo'] ?? '');
+                    $modDownloadUrl = (string)($repositoryEntry['mod_download_url'] ?? $modDownloadUrl);
+                } else {
+                    // Uncatalogued plugins remain visible/configurable, but the
+                    // server will not fetch or install code for them.
+                    $gitRepo = '';
+                }
+                $channelSource = is_array($repositoryEntry) ? $repositoryEntry : [];
+                $channels = is_array($repositoryEntry) && !empty($gitRepo)
+                    ? normalizePluginManagerChannels($channelSource, $name, $gitRepo)
+                    : [];
                 $currentChannelId = (string)($manifest['channel'] ?? ($channelSource['default_channel'] ?? 'main'));
                 if (!isset($channels[$currentChannelId]) && !empty($channels)) {
                     $currentChannelId = array_key_first($channels);
@@ -384,6 +423,9 @@ tr:hover td {
                 $latestVersion = '';
                 if (!empty($gitRepo) && !empty($channels)) {
                     $latestVersion = getPluginManagerChannelVersion($gitRepo, $currentChannel);
+                }
+                if ($latestVersion !== '' && strpos($modDownloadUrl, '<version>') !== false) {
+                    $modDownloadUrl = strtr($modDownloadUrl, ['<version>' => $latestVersion]);
                 }
 
                 echo '<tr>';
@@ -399,7 +441,7 @@ tr:hover td {
                 echo '<td>';
                 if (!empty($configUrl)) {
                     echo '<button onclick="window.open(\'' . htmlspecialchars($configUrl) . '\', \'_blank\')" class="btn-base btn-primary">Plugin Page</button>';
-                    if (isset($manifest['schema_version']) && $manifest['schema_version']==2 && !empty($gitRepo)) {
+                    if (isset($manifest['schema_version']) && $manifest['schema_version']==2 && is_array($repositoryEntry) && !empty($gitRepo)) {
                         $forceCurrentChannel = !empty($currentChannel['allow_force']);
                         $updateUrl = buildPluginInstallerUrl($pluginId, $name, $gitRepo, $currentChannelId, $forceCurrentChannel);
                         echo ' <button onclick="window.open(\'' . htmlspecialchars($updateUrl) . '\', \'_blank\')" class="btn-base btn-save">Update ' . htmlspecialchars($currentChannel['label'] ?? 'Plugin') . '</button>';
@@ -407,7 +449,7 @@ tr:hover td {
                             if ($channelId === $currentChannelId) {
                                 continue;
                             }
-                            $switchUrl = buildPluginInstallerUrl($pluginId, $name, $gitRepo, $channelId, true);
+                            $switchUrl = buildPluginInstallerUrl($pluginId, $name, $gitRepo, $channelId, false);
                             echo ' <button onclick="window.open(\'' . htmlspecialchars($switchUrl) . '\', \'_blank\')" class="btn-base btn-primary">Switch to ' . htmlspecialchars($channel['label']) . '</button>';
                         }
                     }
@@ -518,5 +560,3 @@ $title = $TITLE;
 $buffer = preg_replace('/(<title>)(.*?)(<\/title>)/i', '$1' . $title . '$3', $buffer);
 echo $buffer;
 ?>
-
-

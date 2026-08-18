@@ -4,6 +4,8 @@ ini_set('display_startup_errors', '1');
 error_reporting(E_ALL);
 
 $enginePath = __DIR__ . DIRECTORY_SEPARATOR . ".." . DIRECTORY_SEPARATOR;
+require_once $enginePath . "lib" . DIRECTORY_SEPARATOR . "core" . DIRECTORY_SEPARATOR . "plugin_installer.php";
+
 $pluginRepositoryFile = __DIR__ . DIRECTORY_SEPARATOR . "data" . DIRECTORY_SEPARATOR . "plugin_repository.json";
 $pluginRepository = [];
 if (file_exists($pluginRepositoryFile)) {
@@ -18,12 +20,23 @@ function chimPluginInstallerEscape($value) {
 }
 
 function chimPluginInstallerFetchUrl($url) {
+    $headers = [
+        "User-Agent: CHIM Plugin Installer",
+        "Accept: application/vnd.github.v3+json, application/json, */*",
+    ];
+    $githubToken = trim((string)getenv("GITHUB_TOKEN"));
+    $host = strtolower((string)(parse_url($url, PHP_URL_HOST) ?? ""));
+    if ($githubToken !== "" && $host === "api.github.com") {
+        $headers[] = "Authorization: Bearer " . $githubToken;
+    }
+
     if (!function_exists("curl_init")) {
         $context = stream_context_create([
             "http" => [
                 "method" => "GET",
-                "header" => "User-Agent: CHIM Plugin Installer\r\nAccept: application/vnd.github.v3+json, application/json, */*\r\n",
+                "header" => implode("\r\n", $headers) . "\r\n",
                 "timeout" => 60,
+                "follow_location" => 1,
             ],
         ]);
         return @file_get_contents($url, false, $context);
@@ -33,7 +46,7 @@ function chimPluginInstallerFetchUrl($url) {
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_USERAGENT, "CHIM Plugin Installer");
-    curl_setopt($ch, CURLOPT_HTTPHEADER, ["Accept: application/vnd.github.v3+json, application/json, */*"]);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 60);
     $response = curl_exec($ch);
@@ -46,14 +59,6 @@ function chimPluginInstallerFetchUrl($url) {
     return $response;
 }
 
-function chimPluginInstallerReadJson($path) {
-    if (!file_exists($path)) {
-        return false;
-    }
-    $data = json_decode(file_get_contents($path), true);
-    return json_last_error() === JSON_ERROR_NONE ? $data : false;
-}
-
 function chimPluginInstallerStringEndsWith($value, $suffix) {
     if ($suffix === "") {
         return true;
@@ -62,25 +67,13 @@ function chimPluginInstallerStringEndsWith($value, $suffix) {
 }
 
 function chimPluginInstallerFindRepositoryEntry($pluginRepository, $pluginId, $packageName, $githubRepo) {
-    if ($pluginId !== "" && isset($pluginRepository[$pluginId]) && is_array($pluginRepository[$pluginId])) {
-        $entry = $pluginRepository[$pluginId];
-        $entry["_plugin_id"] = $pluginId;
-        return $entry;
-    }
-
-    foreach ($pluginRepository as $id => $entry) {
-        if (!is_array($entry)) {
-            continue;
-        }
-        $entryName = $entry["name"] ?? "";
-        $entryRepo = $entry["git_repo"] ?? "";
-        if (($packageName !== "" && $entryName === $packageName) || ($githubRepo !== "" && $entryRepo === $githubRepo)) {
-            $entry["_plugin_id"] = $id;
-            return $entry;
-        }
-    }
-
-    return false;
+    return chimPluginInstallerFindTrustedCatalogEntry(
+        $pluginRepository,
+        $pluginId,
+        $packageName,
+        $githubRepo,
+        false
+    );
 }
 
 function chimPluginInstallerReplaceTokens($value, $packageName, $githubRepo, $channelId, $branch) {
@@ -107,7 +100,9 @@ function chimPluginInstallerNormalizeChannels($entry, $packageName, $githubRepo)
 
             $branch = (string)($channelConfig["branch"] ?? $channelId);
             $label = (string)($channelConfig["label"] ?? ucfirst((string)$channelId));
+            $packageSource = (string)($channelConfig["package_source"] ?? "");
             $manifestUrl = (string)($channelConfig["manifest_url"] ?? "");
+            $releaseApiUrl = (string)($channelConfig["release_api_url"] ?? "");
             if ($manifestUrl === "" && $branch !== "") {
                 $manifestUrl = "https://raw.githubusercontent.com/" . $githubRepo . "/" . $branch . "/manifest.json";
             }
@@ -120,10 +115,11 @@ function chimPluginInstallerNormalizeChannels($entry, $packageName, $githubRepo)
             }
 
             if (empty($packageUrls)) {
-                $packageSource = $channelConfig["package_source"] ?? "";
                 if ($packageSource === "branch" || (!in_array($channelId, ["main", "live", "stable"], true) && $branch !== "")) {
+                    $packageSource = "branch";
                     $packageUrls = ["https://github.com/" . $githubRepo . "/archive/refs/heads/" . $branch . ".tar.gz"];
                 } else {
+                    $packageSource = $packageSource !== "" ? $packageSource : "release";
                     $packageUrls = [
                         "https://github.com/" . $githubRepo . "/releases/latest/download/" . $packageName . ".tar.gz",
                         "https://github.com/" . $githubRepo . "/releases/latest/download/" . $packageName . ".tar",
@@ -139,7 +135,9 @@ function chimPluginInstallerNormalizeChannels($entry, $packageName, $githubRepo)
                 "id" => (string)$channelId,
                 "label" => $label,
                 "branch" => $branch,
+                "package_source" => $packageSource,
                 "manifest_url" => chimPluginInstallerReplaceTokens($manifestUrl, $packageName, $githubRepo, (string)$channelId, $branch),
+                "release_api_url" => chimPluginInstallerReplaceTokens($releaseApiUrl, $packageName, $githubRepo, (string)$channelId, $branch),
                 "package_urls" => $packageUrls,
                 "archive_strip_components" => (int)($channelConfig["archive_strip_components"] ?? 1),
                 "allow_force" => (bool)($channelConfig["allow_force"] ?? ($channelId !== "main")),
@@ -152,7 +150,9 @@ function chimPluginInstallerNormalizeChannels($entry, $packageName, $githubRepo)
             "id" => "main",
             "label" => "Live",
             "branch" => "",
+            "package_source" => "release",
             "manifest_url" => "https://api.github.com/repos/" . $githubRepo . "/contents/manifest.json",
+            "release_api_url" => "https://api.github.com/repos/" . $githubRepo . "/releases/latest",
             "package_urls" => [
                 "https://github.com/" . $githubRepo . "/releases/latest/download/" . $packageName . ".tar.gz",
                 "https://github.com/" . $githubRepo . "/releases/latest/download/" . $packageName . ".tar",
@@ -165,8 +165,15 @@ function chimPluginInstallerNormalizeChannels($entry, $packageName, $githubRepo)
     return $channels;
 }
 
-function chimPluginInstallerGetRemoteManifest($channel, $githubRepo) {
-    $manifestUrl = $channel["manifest_url"] ?? "";
+function chimPluginInstallerGetRemoteManifest($channel, $githubRepo, $resolvedCommit = "") {
+    if (
+        ($channel["package_source"] ?? "") === "branch"
+        && preg_match('/^[0-9a-f]{40}$/', (string)$resolvedCommit)
+    ) {
+        $manifestUrl = "https://raw.githubusercontent.com/" . $githubRepo . "/" . $resolvedCommit . "/manifest.json";
+    } else {
+        $manifestUrl = $channel["manifest_url"] ?? "";
+    }
     if ($manifestUrl === "" && !empty($channel["branch"])) {
         $manifestUrl = "https://api.github.com/repos/" . $githubRepo . "/contents/manifest.json?ref=" . rawurlencode($channel["branch"]);
     }
@@ -193,40 +200,284 @@ function chimPluginInstallerGetRemoteManifest($channel, $githubRepo) {
     return is_array($data) ? $data : false;
 }
 
-function chimPluginInstallerRemoveDirectory($dir) {
-    if (!is_dir($dir)) {
-        return;
+function chimPluginInstallerGetRemoteCommit($channel, $githubRepo) {
+    if (($channel["package_source"] ?? "") !== "branch") {
+        return "";
     }
-    $items = scandir($dir);
-    foreach ($items as $item) {
-        if ($item === "." || $item === "..") {
-            continue;
-        }
-        $path = $dir . DIRECTORY_SEPARATOR . $item;
-        if (is_dir($path)) {
-            chimPluginInstallerRemoveDirectory($path);
-        } else {
-            @unlink($path);
+
+    $branch = trim((string)($channel["branch"] ?? ""));
+    if ($branch === "") {
+        return false;
+    }
+
+    $response = chimPluginInstallerFetchUrl(
+        "https://api.github.com/repos/" . $githubRepo . "/commits/" . rawurlencode($branch)
+    );
+    if ($response === false) {
+        return false;
+    }
+
+    $data = json_decode($response, true);
+    $sha = is_array($data) ? strtolower((string)($data["sha"] ?? "")) : "";
+    return preg_match('/^[0-9a-f]{40}$/', $sha) ? $sha : false;
+}
+
+function chimPluginInstallerGetRemoteRelease($channel, $githubRepo, $packageName) {
+    if (($channel["package_source"] ?? "") !== "release") {
+        return [];
+    }
+
+    $releaseApiUrl = (string)($channel["release_api_url"] ?? "");
+    if ($releaseApiUrl === "") {
+        $releaseApiUrl = "https://api.github.com/repos/" . $githubRepo . "/releases/latest";
+    }
+    $response = chimPluginInstallerFetchUrl($releaseApiUrl);
+    if ($response === false) {
+        return false;
+    }
+    $release = json_decode($response, true);
+    if (!is_array($release) || empty($release["id"]) || empty($release["tag_name"]) || !isset($release["assets"])) {
+        return false;
+    }
+
+    $configuredAssetNames = [];
+    foreach (($channel["package_urls"] ?? []) as $packageUrl) {
+        $resolvedPackageUrl = strtr((string)$packageUrl, [
+            "<version>" => chimPluginInstallerNormalizeReleaseVersion($release["tag_name"]),
+        ]);
+        $path = (string)(parse_url($resolvedPackageUrl, PHP_URL_PATH) ?? "");
+        $assetName = rawurldecode(basename($path));
+        if ($assetName !== "") {
+            $configuredAssetNames[] = $assetName;
         }
     }
-    @rmdir($dir);
+    if (empty($configuredAssetNames)) {
+        $configuredAssetNames = [$packageName . ".tar.gz", $packageName . ".tar"];
+    }
+
+    $assetsByName = [];
+    foreach ((array)$release["assets"] as $asset) {
+        if (is_array($asset) && !empty($asset["name"]) && !empty($asset["browser_download_url"])) {
+            $assetsByName[(string)$asset["name"]] = $asset;
+        }
+    }
+    $selectedAsset = null;
+    foreach ($configuredAssetNames as $assetName) {
+        if (isset($assetsByName[$assetName])) {
+            $selectedAsset = $assetsByName[$assetName];
+            break;
+        }
+    }
+    if (!is_array($selectedAsset)) {
+        return false;
+    }
+
+    return [
+        "id" => (int)$release["id"],
+        "tag" => (string)$release["tag_name"],
+        "version" => chimPluginInstallerNormalizeReleaseVersion($release["tag_name"]),
+        "asset_id" => (int)($selectedAsset["id"] ?? 0),
+        "asset_name" => (string)$selectedAsset["name"],
+        "asset_url" => (string)$selectedAsset["browser_download_url"],
+    ];
+}
+
+function chimPluginInstallerPinBranchPackage($channel, $githubRepo, $remoteCommit) {
+    if (($channel["package_source"] ?? "") !== "branch") {
+        return $channel;
+    }
+    if (!preg_match('/^[0-9a-f]{40}$/', (string)$remoteCommit)) {
+        throw new RuntimeException("Could not resolve the selected branch to an immutable commit.");
+    }
+
+    $channel["package_urls"] = [
+        "https://github.com/" . $githubRepo . "/archive/" . $remoteCommit . ".tar.gz",
+    ];
+    return $channel;
+}
+
+function chimPluginInstallerPinReleasePackage($channel, $remoteRelease) {
+    if (($channel["package_source"] ?? "") !== "release") {
+        return $channel;
+    }
+    if (!is_array($remoteRelease)
+        || empty($remoteRelease["id"])
+        || empty($remoteRelease["asset_id"])
+        || empty($remoteRelease["asset_url"])) {
+        throw new RuntimeException("Could not resolve the release to an exact GitHub asset.");
+    }
+    $channel["package_urls"] = [(string)$remoteRelease["asset_url"]];
+    return $channel;
+}
+
+function chimPluginInstallerValidateStagedPackage($stagingDir, $packageName, $channel, $remoteManifest, $remoteVersion) {
+    $manifestPath = $stagingDir . DIRECTORY_SEPARATOR . "manifest.json";
+    $manifest = chimPluginInstallerReadJson($manifestPath);
+    if (!is_array($manifest)) {
+        throw new RuntimeException("Package did not contain a valid manifest.json at its root.");
+    }
+
+    $manifestName = (string)($manifest["name"] ?? "");
+    if ($manifestName === "" || $manifestName !== $packageName) {
+        throw new RuntimeException("Package manifest name does not match the requested plugin: " . $packageName);
+    }
+
+    $manifestVersion = (string)($manifest["version"] ?? "");
+    if ($manifestVersion === "") {
+        throw new RuntimeException("Package manifest does not contain a version.");
+    }
+
+    if (($channel["package_source"] ?? "") === "branch" && is_array($remoteManifest)) {
+        $remoteVersion = (string)($remoteManifest["version"] ?? "");
+        if ($remoteVersion !== "" && $remoteVersion !== $manifestVersion) {
+            throw new RuntimeException("Downloaded branch version does not match the version checked before installation.");
+        }
+    }
+    if (($channel["package_source"] ?? "") === "release") {
+        if ($remoteVersion === ""
+            || version_compare(
+                chimPluginInstallerNormalizeReleaseVersion($manifestVersion),
+                chimPluginInstallerNormalizeReleaseVersion($remoteVersion),
+                "!="
+            )) {
+            throw new RuntimeException("Downloaded asset manifest version does not match its GitHub release tag.");
+        }
+    }
+
+    $descriptorPath = $stagingDir . DIRECTORY_SEPARATOR . "dwemer-package.json";
+    if (is_file($descriptorPath)) {
+        $descriptor = chimPluginInstallerReadJson($descriptorPath);
+        if (!is_array($descriptor)) {
+            throw new RuntimeException("Package contains an invalid dwemer-package.json.");
+        }
+        $descriptorName = (string)($descriptor["name"] ?? "");
+        if ($descriptorName !== "" && $descriptorName !== $packageName) {
+            throw new RuntimeException("dwemer-package.json name does not match the requested plugin.");
+        }
+        $descriptorVersion = (string)($descriptor["version"] ?? "");
+        if ($descriptorVersion !== "" && $descriptorVersion !== $manifestVersion) {
+            throw new RuntimeException("manifest.json and dwemer-package.json have different versions.");
+        }
+        // Validate every declared path before the current installation is touched.
+        chimPluginInstallerReadMutablePaths($stagingDir);
+    }
+
+    return $manifest;
 }
 
 function chimPluginInstallerEnsurePluginName($packageName) {
-    return preg_match('/^[A-Za-z0-9_.-]+$/', $packageName) === 1;
+    return chimPluginInstallerIsValidPackageName($packageName);
 }
 
 function chimPluginInstallerEnsureGithubRepo($githubRepo) {
-    return preg_match('/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/', $githubRepo) === 1;
+    return chimPluginInstallerIsValidGithubRepo($githubRepo);
 }
 
 function chimPluginInstallerConnectToDatabase() {
-    $connStr = "host=localhost port=5432 dbname=dwemer user=dwemer password=dwemer";
-    $conn = pg_connect($connStr);
+    $connStr = isset($GLOBALS["CHIM_PLUGIN_INSTALLER_DB_CONNSTR"])
+        ? (string)$GLOBALS["CHIM_PLUGIN_INSTALLER_DB_CONNSTR"]
+        : "host=localhost port=5432 dbname=dwemer user=dwemer password=dwemer";
+    $conn = @pg_connect($connStr, PGSQL_CONNECT_FORCE_NEW);
     if (!$conn) {
-        throw new Exception("Failed to connect to database: " . pg_last_error());
+        throw new RuntimeException("Failed to connect to the CHIM database.");
     }
     return $conn;
+}
+
+function chimPluginInstallerRequireQuery($conn, $sql, $label) {
+    $result = @pg_query($conn, $sql);
+    if ($result === false) {
+        throw new RuntimeException($label . ": " . pg_last_error($conn));
+    }
+    return $result;
+}
+
+function chimPluginInstallerRequireQueryParams($conn, $sql, $params, $label) {
+    $result = @pg_query_params($conn, $sql, $params);
+    if ($result === false) {
+        throw new RuntimeException($label . ": " . pg_last_error($conn));
+    }
+    return $result;
+}
+
+function chimPluginInstallerStripSqlLiteralsAndComments($sql) {
+    $length = strlen($sql);
+    $output = "";
+    for ($i = 0; $i < $length;) {
+        $char = $sql[$i];
+        $next = $i + 1 < $length ? $sql[$i + 1] : "";
+
+        if ($char === "-" && $next === "-") {
+            $i += 2;
+            while ($i < $length && $sql[$i] !== "\n") {
+                $i++;
+            }
+            $output .= "\n";
+            continue;
+        }
+        if ($char === "/" && $next === "*") {
+            $i += 2;
+            $depth = 1;
+            while ($i < $length && $depth > 0) {
+                if ($i + 1 < $length && $sql[$i] === "/" && $sql[$i + 1] === "*") {
+                    $depth++;
+                    $i += 2;
+                } elseif ($i + 1 < $length && $sql[$i] === "*" && $sql[$i + 1] === "/") {
+                    $depth--;
+                    $i += 2;
+                } else {
+                    $i++;
+                }
+            }
+            $output .= " ";
+            continue;
+        }
+        if ($char === "'" || $char === '"') {
+            $quote = $char;
+            $i++;
+            while ($i < $length) {
+                if ($sql[$i] === $quote) {
+                    if ($i + 1 < $length && $sql[$i + 1] === $quote) {
+                        $i += 2;
+                        continue;
+                    }
+                    $i++;
+                    break;
+                }
+                if ($sql[$i] === "\\" && $quote === "'" && $i + 1 < $length) {
+                    $i += 2;
+                    continue;
+                }
+                $i++;
+            }
+            $output .= " ";
+            continue;
+        }
+        if ($char === '$' && preg_match('/\G\$[A-Za-z_][A-Za-z0-9_]*\$|\G\$\$/A', $sql, $match, 0, $i)) {
+            $delimiter = $match[0];
+            $i += strlen($delimiter);
+            $end = strpos($sql, $delimiter, $i);
+            $i = $end === false ? $length : $end + strlen($delimiter);
+            $output .= " ";
+            continue;
+        }
+
+        $output .= $char;
+        $i++;
+    }
+    return $output;
+}
+
+function chimPluginInstallerAssertMigrationSqlTransactional($sql, $migrationName) {
+    $stripped = chimPluginInstallerStripSqlLiteralsAndComments($sql);
+    if (preg_match(
+        '/(?:^|;)\s*(?:BEGIN\b|START\s+TRANSACTION\b|COMMIT\b|END\b|ROLLBACK\b|ABORT\b|SAVEPOINT\b|RELEASE(?:\s+SAVEPOINT)?\b|PREPARE\s+TRANSACTION\b)/i',
+        $stripped
+    )) {
+        throw new RuntimeException(
+            "Migration " . $migrationName . " contains transaction-control SQL. Plugin migrations must leave transaction control to CHIM."
+        );
+    }
 }
 
 function chimPluginInstallerRunMigrations($targetDir, $packageName) {
@@ -235,43 +486,148 @@ function chimPluginInstallerRunMigrations($targetDir, $packageName) {
         echo "<p class='log-info'>No migrations directory found, skipping database migrations.</p>\n";
         return true;
     }
+    if (is_link($migrationsDir)) {
+        echo "<p class='log-error'>Migration directory is a symlink and was rejected.</p>\n";
+        return false;
+    }
 
+    $migrationSql = [];
+    $migrations = glob($migrationsDir . DIRECTORY_SEPARATOR . "*.sql");
+    if ($migrations === false) {
+        echo "<p class='log-error'>Could not enumerate database migrations.</p>\n";
+        return false;
+    }
+    if (empty($migrations)) {
+        echo "<p class='log-info'>No migration files found.</p>\n";
+        return true;
+    }
+    sort($migrations, SORT_STRING);
+    try {
+        foreach ($migrations as $migrationFile) {
+            if (!is_file($migrationFile) || is_link($migrationFile) || !is_readable($migrationFile)) {
+                throw new RuntimeException("Migration file is unreadable or unsafe: " . basename($migrationFile));
+            }
+            $sql = @file_get_contents($migrationFile);
+            if ($sql === false || trim($sql) === "") {
+                throw new RuntimeException("Migration file is empty or unreadable: " . basename($migrationFile));
+            }
+            chimPluginInstallerAssertMigrationSqlTransactional($sql, basename($migrationFile));
+            $migrationSql[basename($migrationFile)] = $sql;
+        }
+    } catch (Throwable $e) {
+        echo "<p class='log-error'>Error preparing migrations: " . chimPluginInstallerEscape($e->getMessage()) . "</p>\n";
+        return false;
+    }
+
+    $conn = null;
+    $committedMigrations = [];
     try {
         $conn = chimPluginInstallerConnectToDatabase();
-        pg_query($conn, "CREATE SCHEMA IF NOT EXISTS plugins");
-        pg_query($conn, "CREATE TABLE IF NOT EXISTS plugins.plugin_migrations (plugin_name VARCHAR(255), migration_name VARCHAR(255), executed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (plugin_name, migration_name))");
+        chimPluginInstallerRequireQuery($conn, "BEGIN", "Could not start migration transaction");
+        chimPluginInstallerRequireQuery($conn, "SET LOCAL lock_timeout = '30s'", "Could not set migration lock timeout");
+        chimPluginInstallerRequireQueryParams(
+            $conn,
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            ["chim-plugin-migrations"],
+            "Could not acquire global plugin migration lock"
+        );
+        chimPluginInstallerRequireQuery($conn, "CREATE SCHEMA IF NOT EXISTS plugins", "Could not create plugins schema");
+        chimPluginInstallerRequireQuery(
+            $conn,
+            "CREATE TABLE IF NOT EXISTS plugins.plugin_migrations (plugin_name VARCHAR(255) NOT NULL, migration_name VARCHAR(255) NOT NULL, executed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (plugin_name, migration_name))",
+            "Could not create plugin migration history"
+        );
 
-        $migrations = glob($migrationsDir . DIRECTORY_SEPARATOR . "*.sql");
-        if (empty($migrations)) {
-            echo "<p class='log-info'>No migration files found.</p>\n";
-            pg_close($conn);
-            return true;
+        $legacyResult = chimPluginInstallerRequireQueryParams(
+            $conn,
+            "SELECT to_regclass($1) AS table_name",
+            ["public.plugin_migrations"],
+            "Could not inspect legacy migration history"
+        );
+        $legacyRow = pg_fetch_assoc($legacyResult);
+        if ($legacyRow === false) {
+            throw new RuntimeException("Could not read legacy migration history lookup.");
+        }
+        if (!empty($legacyRow["table_name"])) {
+            $columnResult = chimPluginInstallerRequireQueryParams(
+                $conn,
+                "SELECT column_name FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2",
+                ["public", "plugin_migrations"],
+                "Could not inspect legacy migration history columns"
+            );
+            $legacyColumns = [];
+            while ($column = pg_fetch_assoc($columnResult)) {
+                $legacyColumns[(string)$column["column_name"]] = true;
+            }
+            if (!isset($legacyColumns["plugin_name"], $legacyColumns["migration_name"])) {
+                throw new RuntimeException("Legacy public.plugin_migrations has an incompatible schema.");
+            }
+            $executedAtExpression = isset($legacyColumns["executed_at"])
+                ? "COALESCE(executed_at, CURRENT_TIMESTAMP)"
+                : "CURRENT_TIMESTAMP";
+            chimPluginInstallerRequireQuery(
+                $conn,
+                "INSERT INTO plugins.plugin_migrations (plugin_name, migration_name, executed_at) "
+                    . "SELECT plugin_name, migration_name, " . $executedAtExpression . " FROM public.plugin_migrations "
+                    . "WHERE plugin_name IS NOT NULL AND migration_name IS NOT NULL "
+                    . "ON CONFLICT (plugin_name, migration_name) DO NOTHING",
+                "Could not import legacy migration history"
+            );
         }
 
-        sort($migrations);
-        foreach ($migrations as $migrationFile) {
-            $migrationName = basename($migrationFile);
-            $result = pg_query_params($conn, "SELECT 1 FROM plugins.plugin_migrations WHERE plugin_name = $1 AND migration_name = $2", [$packageName, $migrationName]);
-            if ($result && pg_num_rows($result) > 0) {
+        foreach ($migrationSql as $migrationName => $sql) {
+            $history = chimPluginInstallerRequireQueryParams(
+                $conn,
+                "SELECT 1 FROM plugins.plugin_migrations WHERE plugin_name = $1 AND migration_name = $2",
+                [$packageName, $migrationName],
+                "Could not check migration history for " . $migrationName
+            );
+            if (pg_num_rows($history) > 0) {
                 echo "<p class='log-skipped'>Skipping already executed migration: " . chimPluginInstallerEscape($migrationName) . "</p>\n";
                 continue;
             }
 
-            echo "<p class='log-running'>Running migration: " . chimPluginInstallerEscape($migrationName) . "</p>\n";
-            $sql = file_get_contents($migrationFile);
-            $migrationResult = pg_query($conn, $sql);
-            if ($migrationResult === false) {
-                throw new Exception("Migration failed: " . $migrationName . " - " . pg_last_error($conn));
+            echo "<p class='log-running'>Applying migration inside database transaction: " . chimPluginInstallerEscape($migrationName) . "</p>\n";
+            chimPluginInstallerRequireQuery($conn, $sql, "Migration failed: " . $migrationName);
+            if (pg_transaction_status($conn) !== PGSQL_TRANSACTION_INTRANS) {
+                throw new RuntimeException(
+                    "Migration " . $migrationName . " ended the installer transaction; database rollback cannot be guaranteed."
+                );
             }
-            pg_query_params($conn, "INSERT INTO plugins.plugin_migrations (plugin_name, migration_name) VALUES ($1, $2)", [$packageName, $migrationName]);
-            echo "<p class='log-completed'>Migration completed: " . chimPluginInstallerEscape($migrationName) . "</p>\n";
+            chimPluginInstallerRequireQueryParams(
+                $conn,
+                "INSERT INTO plugins.plugin_migrations (plugin_name, migration_name) VALUES ($1, $2)",
+                [$packageName, $migrationName],
+                "Could not record migration history for " . $migrationName
+            );
+            $committedMigrations[] = $migrationName;
         }
 
-        pg_close($conn);
+        chimPluginInstallerRequireQuery($conn, "COMMIT", "Could not commit plugin migrations");
+        foreach ($committedMigrations as $migrationName) {
+            echo "<p class='log-completed'>Migration committed: " . chimPluginInstallerEscape($migrationName) . "</p>\n";
+        }
         return true;
-    } catch (Exception $e) {
-        echo "<p class='log-error'>Error running migrations: " . chimPluginInstallerEscape($e->getMessage()) . "</p>\n";
+    } catch (Throwable $e) {
+        $rollbackNote = "";
+        if ($conn !== null) {
+            $status = @pg_transaction_status($conn);
+            if ($status === PGSQL_TRANSACTION_INTRANS || $status === PGSQL_TRANSACTION_INERROR) {
+                $rollbackResult = @pg_query($conn, "ROLLBACK");
+                $rollbackNote = $rollbackResult === false
+                    ? " Database rollback failed."
+                    : " Database transaction rolled back.";
+            } elseif ($status === PGSQL_TRANSACTION_IDLE) {
+                $rollbackNote = " The transaction was already closed, so database rollback cannot be guaranteed.";
+            }
+        }
+        echo "<p class='log-error'>Error running migrations: "
+            . chimPluginInstallerEscape($e->getMessage() . $rollbackNote) . "</p>\n";
         return false;
+    } finally {
+        if ($conn !== null) {
+            @pg_close($conn);
+        }
     }
 }
 
@@ -295,7 +651,7 @@ function chimPluginInstallerRunComposer($targetDir) {
     return true;
 }
 
-function chimPluginInstallerDownloadPackage($channel, $targetParent, $packageName) {
+function chimPluginInstallerDownloadPackage($channel, $storageDir, $packageName, $groupId) {
     foreach ($channel["package_urls"] as $packageUrl) {
         echo "<p class='log-action'>Trying package URL: " . chimPluginInstallerEscape($packageUrl) . "</p>\n";
         $downloadContent = chimPluginInstallerFetchUrl($packageUrl);
@@ -306,124 +662,324 @@ function chimPluginInstallerDownloadPackage($channel, $targetParent, $packageNam
 
         $packagePath = parse_url($packageUrl, PHP_URL_PATH) ?? "";
         $extension = chimPluginInstallerStringEndsWith($packagePath, ".tar") ? ".tar" : ".tar.gz";
-        $archiveFile = $targetParent . DIRECTORY_SEPARATOR . "." . $packageName . "-download-" . uniqid("", true) . $extension;
+        $archiveFile = chimPluginInstallerUniqueStoragePath($storageDir, $packageName, "download") . $extension;
         if (@file_put_contents($archiveFile, $downloadContent) === false) {
             throw new Exception("Failed to write downloaded archive.");
         }
+        if (!@chmod($archiveFile, 0660)) {
+            @unlink($archiveFile);
+            throw new Exception("Failed to secure downloaded archive permissions.");
+        }
+        chimPluginInstallerSetGroup($archiveFile, $groupId);
         return [$archiveFile, $packageUrl];
     }
 
     throw new Exception("Failed to download package from all configured channel URLs.");
 }
 
-function chimPluginInstallerInstallPackage($channel, $targetDir, $packageName, $githubRepo) {
+function chimPluginInstallerValidateArchivePaths($archiveFile, $isGzip, $stripComponents) {
+    $listFlags = $isGzip ? "-tzf" : "-tf";
+    $command = "tar " . $listFlags . " " . escapeshellarg($archiveFile);
+    $entries = [];
+    exec($command, $entries, $status);
+    if ($status !== 0 || empty($entries)) {
+        throw new RuntimeException("Downloaded package is empty or could not be inspected.");
+    }
+
+    $usableEntries = 0;
+    foreach ($entries as $entry) {
+        $entry = str_replace('\\', '/', (string)$entry);
+        if ($entry === '' || $entry[0] === '/' || preg_match('/^[A-Za-z]:\//', $entry)) {
+            throw new RuntimeException("Downloaded package contains an absolute archive path.");
+        }
+        $segments = array_values(array_filter(explode('/', $entry), function ($segment) {
+            return $segment !== '' && $segment !== '.';
+        }));
+        foreach ($segments as $segment) {
+            if ($segment === '..' || strpos($segment, "\0") !== false) {
+                throw new RuntimeException("Downloaded package contains a path traversal entry.");
+            }
+        }
+        if (count($segments) <= $stripComponents) {
+            continue;
+        }
+        $usableEntries++;
+    }
+    if ($usableEntries === 0) {
+        throw new RuntimeException("Downloaded package has no files after archive path stripping.");
+    }
+}
+
+function chimPluginInstallerInstallPackage(
+    $channel,
+    $targetDir,
+    $packageName,
+    $githubRepo,
+    $remoteManifest,
+    $remoteCommit,
+    $remoteVersion,
+    $remoteRelease,
+    $storageDir
+) {
     $targetParent = dirname($targetDir);
     if (!is_dir($targetParent) || !is_writable($targetParent)) {
         throw new Exception("Target parent is not writable: " . $targetParent);
     }
-
-    [$archiveFile, $downloadedUrl] = chimPluginInstallerDownloadPackage($channel, $targetParent, $packageName);
-    $stagingDir = $targetParent . DIRECTORY_SEPARATOR . "." . $packageName . "-install-" . uniqid("", true);
-    if (!mkdir($stagingDir, 0755, true)) {
-        @unlink($archiveFile);
-        throw new Exception("Failed to create staging directory.");
+    $resolvedTarget = chimPluginInstallerResolveDirectChild($targetParent, $packageName);
+    if ($resolvedTarget !== $targetDir) {
+        throw new Exception("Plugin target failed direct-child validation.");
     }
 
-    $isGzip = !chimPluginInstallerStringEndsWith($archiveFile, ".tar");
-    $tarFlags = $isGzip ? "xvfz" : "xvf";
-    $stripComponents = max(0, (int)($channel["archive_strip_components"] ?? 1));
-    $extractCmd = "tar " . $tarFlags . " " . escapeshellarg($archiveFile) . " -C " . escapeshellarg($stagingDir) . " --strip-components=" . $stripComponents;
-
-    echo "<p class='log-action'>Extracting package...</p>\n";
-    ob_start();
-    system($extractCmd, $extractStatus);
-    $extractOutput = ob_get_clean();
-    echo "<div class='system-command-output'>" . nl2br(chimPluginInstallerEscape($extractOutput)) . "</div>";
-    @unlink($archiveFile);
-
-    if ($extractStatus !== 0) {
-        chimPluginInstallerRemoveDirectory($stagingDir);
-        throw new Exception("Failed to extract archive from " . $downloadedUrl);
+    $channel = chimPluginInstallerPinBranchPackage($channel, $githubRepo, $remoteCommit);
+    $channel = chimPluginInstallerPinReleasePackage($channel, $remoteRelease);
+    $groupId = @filegroup($targetParent);
+    if ($groupId === false) {
+        throw new Exception("Could not determine the plugin server group.");
     }
+    $storageDir = chimPluginInstallerPrepareStorage($storageDir, $groupId);
 
-    $manifestPath = $stagingDir . DIRECTORY_SEPARATOR . "manifest.json";
-    $manifest = chimPluginInstallerReadJson($manifestPath);
-    if (!is_array($manifest)) {
-        chimPluginInstallerRemoveDirectory($stagingDir);
-        throw new Exception("Package did not contain a valid manifest.json at its root.");
+    $lockPath = $storageDir . DIRECTORY_SEPARATOR . $packageName . "-installer.lock";
+    $lockHandle = @fopen($lockPath, "c");
+    if ($lockHandle === false || !@flock($lockHandle, LOCK_EX | LOCK_NB)) {
+        if (is_resource($lockHandle)) {
+            fclose($lockHandle);
+        }
+        throw new Exception("Another update for this plugin is already running.");
     }
+    @chmod($lockPath, 0660);
+    chimPluginInstallerSetGroup($lockPath, $groupId);
 
-    $manifest["channel"] = $channel["id"];
-    $manifest["channel_label"] = $channel["label"];
-    if (!isset($manifest["git_repo"])) {
+    $archiveFile = null;
+    $stagingDir = null;
+
+    try {
+        [$archiveFile, $downloadedUrl] = chimPluginInstallerDownloadPackage($channel, $storageDir, $packageName, $groupId);
+        $stagingDir = chimPluginInstallerUniqueStoragePath($storageDir, $packageName, "install");
+        if (!mkdir($stagingDir, 0775, true)) {
+            throw new Exception("Failed to create staging directory.");
+        }
+        @chmod($stagingDir, 0775);
+        chimPluginInstallerSetGroup($stagingDir, $groupId);
+
+        $isGzip = !chimPluginInstallerStringEndsWith($archiveFile, ".tar");
+        $tarFlags = $isGzip ? "-xzf" : "-xf";
+        $stripComponents = max(0, (int)($channel["archive_strip_components"] ?? 1));
+        chimPluginInstallerValidateArchivePaths($archiveFile, $isGzip, $stripComponents);
+        $extractCmd = "tar " . $tarFlags . " " . escapeshellarg($archiveFile)
+            . " -C " . escapeshellarg($stagingDir)
+            . " --strip-components=" . $stripComponents
+            . " --no-same-owner --no-same-permissions";
+
+        echo "<p class='log-action'>Extracting package into an isolated staging directory...</p>\n";
+        ob_start();
+        system($extractCmd, $extractStatus);
+        $extractOutput = ob_get_clean();
+        if ($extractOutput !== "") {
+            echo "<div class='system-command-output'>" . nl2br(chimPluginInstallerEscape($extractOutput)) . "</div>";
+        }
+        if ($extractStatus !== 0) {
+            throw new Exception("Failed to extract archive from " . $downloadedUrl);
+        }
+
+        $manifest = chimPluginInstallerValidateStagedPackage(
+            $stagingDir,
+            $packageName,
+            $channel,
+            $remoteManifest,
+            $remoteVersion
+        );
+
+        $preservedPaths = chimPluginInstallerPreserveMutablePaths($targetDir, $stagingDir);
+        foreach ($preservedPaths as $preservedPath) {
+            echo "<p class='log-info'>Preserved local setting: " . chimPluginInstallerEscape($preservedPath) . "</p>\n";
+        }
+
+        $manifestPath = $stagingDir . DIRECTORY_SEPARATOR . "manifest.json";
+        $manifest["channel"] = $channel["id"];
+        $manifest["channel_label"] = $channel["label"];
         $manifest["git_repo"] = $githubRepo;
-    }
-    file_put_contents($manifestPath, json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+        if (($channel["package_source"] ?? "") === "branch") {
+            $manifest["installed_commit"] = $remoteCommit;
+            $manifest["installed_branch"] = (string)($channel["branch"] ?? "");
+            unset(
+                $manifest["installed_release_id"],
+                $manifest["installed_release_tag"],
+                $manifest["installed_release_asset_id"],
+                $manifest["installed_release_asset"]
+            );
+        } else {
+            unset($manifest["installed_commit"], $manifest["installed_branch"]);
+            $manifest["installed_release_id"] = (int)$remoteRelease["id"];
+            $manifest["installed_release_tag"] = (string)$remoteRelease["tag"];
+            $manifest["installed_release_asset_id"] = (int)$remoteRelease["asset_id"];
+            $manifest["installed_release_asset"] = (string)$remoteRelease["asset_name"];
+        }
+        $encodedManifest = json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        if ($encodedManifest === false || @file_put_contents($manifestPath, $encodedManifest . "\n") === false) {
+            throw new Exception("Failed to write installer metadata to the staged manifest.");
+        }
 
-    if (is_dir($targetDir)) {
-        chimPluginInstallerRemoveDirectory($targetDir);
-    }
-    if (!rename($stagingDir, $targetDir)) {
-        chimPluginInstallerRemoveDirectory($stagingDir);
-        throw new Exception("Failed to move staged plugin into target directory.");
-    }
+        // Dependencies are built before activation so a Composer failure cannot damage the live plugin.
+        chimPluginInstallerRunComposer($stagingDir);
+        chimPluginInstallerApplyTreePermissions($stagingDir, $groupId);
 
-    echo "<p class='log-info'>Checking for database migrations...</p>\n";
-    if (!chimPluginInstallerRunMigrations($targetDir, $packageName)) {
-        throw new Exception("Failed to run database migrations.");
-    }
+        echo "<p class='log-action'>Activating staged files with protected filesystem rollback...</p>\n";
+        $activation = chimPluginInstallerActivateStaging(
+            $stagingDir,
+            $targetDir,
+            $storageDir,
+            function ($activeDir) use ($packageName) {
+                echo "<p class='log-info'>Checking for database migrations...</p>\n";
+                if (!chimPluginInstallerRunMigrations($activeDir, $packageName)) {
+                    throw new Exception("Failed to run database migrations.");
+                }
+            }
+        );
+        $stagingDir = null;
 
-    chimPluginInstallerRunComposer($targetDir);
-    echo "<p class='log-success'>Package successfully installed/updated.</p>\n";
-    return true;
+        if (($activation["cleanup_warning"] ?? "") !== "") {
+            echo "<p class='log-error'>" . chimPluginInstallerEscape($activation["cleanup_warning"]) . "</p>\n";
+        }
+        echo "<p class='log-success'>Package successfully installed/updated.</p>\n";
+        return true;
+    } finally {
+        if ($archiveFile !== null && (is_file($archiveFile) || is_link($archiveFile))) {
+            @unlink($archiveFile);
+        }
+        if ($stagingDir !== null && is_dir($stagingDir)) {
+            chimPluginInstallerRemoveDirectory($stagingDir);
+        }
+        @flock($lockHandle, LOCK_UN);
+        fclose($lockHandle);
+    }
 }
 
-$pluginId = (string)($_GET["PLUGIN_ID"] ?? "");
-$packageName = (string)($_GET["PACKAGE_NAME"] ?? "");
-$githubRepo = (string)($_GET["GITHUB_REPO"] ?? "");
-$requestedChannel = (string)($_GET["CHANNEL"] ?? "");
-$forceInstall = isset($_GET["FORCE"]) && $_GET["FORCE"] !== "0";
-
-$repositoryEntry = chimPluginInstallerFindRepositoryEntry($pluginRepository, $pluginId, $packageName, $githubRepo);
-if (is_array($repositoryEntry)) {
-    $packageName = $packageName !== "" ? $packageName : (string)($repositoryEntry["name"] ?? "");
-    $githubRepo = $githubRepo !== "" ? $githubRepo : (string)($repositoryEntry["git_repo"] ?? "");
+if (defined("CHIM_PLUGIN_INSTALLER_FUNCTIONS_ONLY") && CHIM_PLUGIN_INSTALLER_FUNCTIONS_ONLY) {
+    return;
 }
+
+$requestMethod = strtoupper((string)($_SERVER["REQUEST_METHOD"] ?? "GET"));
+$isPostRequest = $requestMethod === "POST";
+$requestInput = $isPostRequest ? $_POST : $_GET;
+$pluginId = (string)($requestInput["PLUGIN_ID"] ?? "");
+$legacyPackageName = (string)($requestInput["PACKAGE_NAME"] ?? "");
+$legacyGithubRepo = (string)($requestInput["GITHUB_REPO"] ?? "");
+$requestedChannel = (string)($requestInput["CHANNEL"] ?? "");
+$forceInstall = isset($requestInput["FORCE"]) && $requestInput["FORCE"] !== "0";
+$isAuthorizedMutation = $isPostRequest && chimPluginInstallerIsSameOriginMutationRequest($_SERVER);
 
 $errors = [];
-if ($packageName === "" || !chimPluginInstallerEnsurePluginName($packageName)) {
-    $errors[] = "Invalid or missing PACKAGE_NAME.";
-}
-if ($githubRepo === "" || !chimPluginInstallerEnsureGithubRepo($githubRepo)) {
-    $errors[] = "Invalid or missing GITHUB_REPO.";
+if ($isPostRequest && !$isAuthorizedMutation) {
+    http_response_code(403);
+    $errors[] = "Installation request rejected. Use the confirmation button from this same CHIM server.";
 }
 
-$targetDir = $enginePath . "ext" . DIRECTORY_SEPARATOR . $packageName;
-$localManifest = chimPluginInstallerReadJson($targetDir . DIRECTORY_SEPARATOR . "manifest.json");
-$channelSource = is_array($repositoryEntry) ? $repositoryEntry : (is_array($localManifest) ? $localManifest : []);
-$channels = empty($errors) ? chimPluginInstallerNormalizeChannels($channelSource, $packageName, $githubRepo) : [];
+$repositoryEntry = chimPluginInstallerFindTrustedCatalogEntry(
+    $pluginRepository,
+    $pluginId,
+    $legacyPackageName,
+    $legacyGithubRepo,
+    $isPostRequest
+);
+$packageName = "";
+$githubRepo = "";
+if (!is_array($repositoryEntry)) {
+    $errors[] = "Plugin is not a trusted entry in the CHIM plugin repository.";
+} else {
+    $pluginId = (string)$repositoryEntry["_plugin_id"];
+    $packageName = (string)($repositoryEntry["name"] ?? "");
+    $githubRepo = (string)($repositoryEntry["git_repo"] ?? "");
+}
+if ($packageName === "" || !chimPluginInstallerEnsurePluginName($packageName)) {
+    $errors[] = "Trusted catalog contains an invalid package name.";
+}
+if ($githubRepo === "" || !chimPluginInstallerEnsureGithubRepo($githubRepo)) {
+    $errors[] = "Trusted catalog contains an invalid GitHub repository.";
+}
+
+$extRoot = realpath($enginePath . "ext");
+$targetDir = "";
+if (empty($errors)) {
+    try {
+        $targetDir = chimPluginInstallerResolveDirectChild($extRoot, $packageName);
+    } catch (Throwable $e) {
+        $errors[] = $e->getMessage();
+    }
+}
+$localManifest = $targetDir !== ""
+    ? chimPluginInstallerReadJson($targetDir . DIRECTORY_SEPARATOR . "manifest.json")
+    : false;
+$channels = empty($errors)
+    ? chimPluginInstallerNormalizeChannels($repositoryEntry, $packageName, $githubRepo)
+    : [];
 $currentChannel = is_array($localManifest) ? (string)($localManifest["channel"] ?? "") : "";
 $defaultChannel = (string)((is_array($repositoryEntry) ? ($repositoryEntry["default_channel"] ?? "") : "") ?: ($currentChannel ?: "main"));
 $requestedChannel = $requestedChannel !== "" ? $requestedChannel : $defaultChannel;
-
 if (empty($errors) && !isset($channels[$requestedChannel])) {
     $errors[] = "Unknown plugin channel: " . $requestedChannel;
 }
 
 $channel = empty($errors) ? $channels[$requestedChannel] : null;
-$remoteManifest = $channel ? chimPluginInstallerGetRemoteManifest($channel, $githubRepo) : false;
-$remoteVersion = is_array($remoteManifest) ? (string)($remoteManifest["version"] ?? "") : "";
+if ($channel && !chimPluginInstallerForceAllowed($forceInstall, $channel)) {
+    $errors[] = "Forced reinstall is not allowed for this plugin channel.";
+}
+
+$remoteCommit = "";
+$remoteManifest = false;
+$remoteRelease = [];
+$remoteVersion = "";
+if ($channel && empty($errors)) {
+    if (($channel["package_source"] ?? "") === "branch") {
+        $remoteCommit = chimPluginInstallerGetRemoteCommit($channel, $githubRepo);
+        $remoteManifest = chimPluginInstallerGetRemoteManifest($channel, $githubRepo, $remoteCommit);
+        $remoteVersion = is_array($remoteManifest) ? (string)($remoteManifest["version"] ?? "") : "";
+        if (!is_array($remoteManifest) || $remoteVersion === "") {
+            $errors[] = "Could not retrieve a valid manifest from the selected branch commit.";
+        }
+        if ($remoteCommit === false || $remoteCommit === "") {
+            $errors[] = "Could not resolve the selected branch commit. GitHub may be unavailable or API-rate-limited.";
+        }
+    } elseif (($channel["package_source"] ?? "") === "release") {
+        $remoteRelease = chimPluginInstallerGetRemoteRelease($channel, $githubRepo, $packageName);
+        if (!is_array($remoteRelease) || empty($remoteRelease["version"])) {
+            $errors[] = "Could not resolve the latest release to an exact downloadable asset.";
+        } else {
+            $remoteVersion = (string)$remoteRelease["version"];
+        }
+    } else {
+        $errors[] = "Trusted catalog channel has an unsupported package source.";
+    }
+}
 if ($channel && $remoteVersion !== "") {
-    $channel["package_urls"] = array_map(function ($url) use ($remoteVersion) {
-        return strtr($url, ["<version>" => $remoteVersion]);
+    $channel["package_urls"] = array_map(function ($url) use ($remoteVersion, $remoteCommit) {
+        return strtr((string)$url, [
+            "<version>" => $remoteVersion,
+            "<commit>" => (string)$remoteCommit,
+        ]);
     }, $channel["package_urls"]);
 }
+
 $currentVersion = is_array($localManifest) ? (string)($localManifest["version"] ?? "") : "";
+$currentCommit = is_array($localManifest) ? (string)($localManifest["installed_commit"] ?? "") : "";
+$currentReleaseAssetId = is_array($localManifest) ? (int)($localManifest["installed_release_asset_id"] ?? 0) : 0;
 $installed = is_array($localManifest);
 $channelChanged = $installed && $currentChannel !== "" && $currentChannel !== $requestedChannel;
 $updateAvailable = !$installed || $channelChanged || $forceInstall;
 if (!$updateAvailable && $remoteVersion !== "" && $currentVersion !== "") {
     $updateAvailable = version_compare($remoteVersion, $currentVersion, ">");
+}
+if (!$updateAvailable && $channel && ($channel["package_source"] ?? "") === "branch") {
+    $updateAvailable = !chimPluginInstallerCommitsMatch($currentCommit, $remoteCommit);
+}
+if (!$updateAvailable && $channel && ($channel["package_source"] ?? "") === "release") {
+    $updateAvailable = $currentReleaseAssetId === 0
+        || $currentReleaseAssetId !== (int)($remoteRelease["asset_id"] ?? 0);
+}
+
+$storageDir = trim((string)getenv("CHIM_PLUGIN_INSTALLER_STORAGE_DIR"));
+if ($storageDir === "") {
+    $storageDir = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+        . DIRECTORY_SEPARATOR . "chim-plugin-installer";
 }
 
 ?>
@@ -472,11 +1028,17 @@ if (!$updateAvailable && $remoteVersion !== "" && $currentVersion !== "") {
                 <?php if ($installed): ?>
                     <p><strong>Current Version:</strong> <?php echo chimPluginInstallerEscape($currentVersion); ?></p>
                     <p><strong>Current Channel:</strong> <?php echo chimPluginInstallerEscape($currentChannel ?: "legacy"); ?></p>
+                    <?php if ($currentCommit !== ""): ?>
+                        <p><strong>Installed Commit:</strong> <?php echo chimPluginInstallerEscape(substr($currentCommit, 0, 12)); ?></p>
+                    <?php endif; ?>
                 <?php endif; ?>
                 <?php if ($remoteVersion !== ""): ?>
                     <p><strong>Remote Version:</strong> <?php echo chimPluginInstallerEscape($remoteVersion); ?></p>
                 <?php else: ?>
                     <p class="log-error">Could not retrieve remote version information for this channel.</p>
+                <?php endif; ?>
+                <?php if (is_string($remoteCommit) && $remoteCommit !== ""): ?>
+                    <p><strong>Remote Commit:</strong> <?php echo chimPluginInstallerEscape(substr($remoteCommit, 0, 12)); ?></p>
                 <?php endif; ?>
                 <p><strong>Install Needed:</strong> <?php echo $updateAvailable ? "Yes" : "No"; ?></p>
             <?php endif; ?>
@@ -485,22 +1047,72 @@ if (!$updateAvailable && $remoteVersion !== "" && $currentVersion !== "") {
         <?php
         if (!empty($errors)) {
             echo '<div class="status-message status-error">Could not proceed due to installer configuration errors.</div>';
-        } elseif ($updateAvailable) {
+        } elseif (chimPluginInstallerShouldExecuteInstall($isAuthorizedMutation, $updateAvailable, $errors)) {
             echo '<h3>Installation Log</h3>';
             echo '<div class="installer-log">';
             try {
-                chimPluginInstallerInstallPackage($channel, $targetDir, $packageName, $githubRepo);
+                chimPluginInstallerInstallPackage(
+                    $channel,
+                    $targetDir,
+                    $packageName,
+                    $githubRepo,
+                    $remoteManifest,
+                    $remoteCommit,
+                    $remoteVersion,
+                    $remoteRelease,
+                    $storageDir
+                );
                 echo '</div>';
                 echo '<div class="status-message status-success">Installation/update process completed.</div>';
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 echo '<p class="log-error">Error: ' . chimPluginInstallerEscape($e->getMessage()) . '</p>';
                 echo '</div>';
                 echo '<div class="status-message status-error">Installation/update process failed.</div>';
             }
+        } elseif ($updateAvailable) {
+            echo '<h3>Ready to Install</h3>';
+            echo '<p>This page has only checked the trusted catalog and remote package. No files have been changed.</p>';
+            echo '<form id="chim-plugin-install-form" method="post">';
+            echo '<input type="hidden" name="PLUGIN_ID" value="' . chimPluginInstallerEscape($pluginId) . '">';
+            echo '<input type="hidden" name="CHANNEL" value="' . chimPluginInstallerEscape($requestedChannel) . '">';
+            if ($forceInstall) {
+                echo '<input type="hidden" name="FORCE" value="1">';
+            }
+            echo '<button type="submit" class="button btn-primary">Confirm Install/Update</button>';
+            echo '</form>';
+            echo '<div id="chim-plugin-install-status" class="log-info" style="margin-top:12px;"></div>';
         } else {
             echo '<div class="status-message status-success">Plugin is already installed and up to date for this channel.</div>';
         }
         ?>
     </div>
+    <script>
+    (() => {
+        const form = document.getElementById('chim-plugin-install-form');
+        if (!form) return;
+        const status = document.getElementById('chim-plugin-install-status');
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const button = form.querySelector('button[type="submit"]');
+            button.disabled = true;
+            status.textContent = 'Installing from the trusted catalog...';
+            try {
+                const response = await fetch(window.location.pathname, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'X-CHIM-Plugin-Action': 'install' },
+                    body: new FormData(form)
+                });
+                const html = await response.text();
+                document.open();
+                document.write(html);
+                document.close();
+            } catch (error) {
+                status.textContent = 'Install request failed: ' + error.message;
+                button.disabled = false;
+            }
+        });
+    })();
+    </script>
 </body>
 </html>
